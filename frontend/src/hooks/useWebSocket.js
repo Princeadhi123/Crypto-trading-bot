@@ -5,10 +5,15 @@ export function useWebSocket(onMessage) {
   const [isConnected, setIsConnected] = useState(false)
   const reconnectTimeoutRef = useRef(null)
   const onMessageRef = useRef(onMessage)
+  const isMountedRef = useRef(true)
   onMessageRef.current = onMessage
 
   const connect = useCallback(() => {
-    const wsUrl = `ws://${window.location.hostname}:8000/ws`
+    if (!isMountedRef.current) return
+    // Use the same host/protocol as the page — routes through Vite proxy in dev,
+    // works correctly in any deployed environment without hardcoding a port.
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const wsUrl = `${protocol}//${window.location.host}/ws`
     const socket = new WebSocket(wsUrl)
     socketRef.current = socket
 
@@ -30,7 +35,10 @@ export function useWebSocket(onMessage) {
 
     socket.onclose = () => {
       setIsConnected(false)
-      reconnectTimeoutRef.current = setTimeout(connect, 3000)
+      // Only schedule reconnect if still mounted — prevents leak after unmount
+      if (isMountedRef.current) {
+        reconnectTimeoutRef.current = setTimeout(connect, 3000)
+      }
     }
 
     socket.onerror = () => {
@@ -39,6 +47,7 @@ export function useWebSocket(onMessage) {
   }, [])
 
   useEffect(() => {
+    isMountedRef.current = true
     connect()
     const pingInterval = setInterval(() => {
       if (socketRef.current?.readyState === WebSocket.OPEN) {
@@ -47,6 +56,7 @@ export function useWebSocket(onMessage) {
     }, 20000)
 
     return () => {
+      isMountedRef.current = false
       clearInterval(pingInterval)
       if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current)
       socketRef.current?.close()

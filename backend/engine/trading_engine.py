@@ -527,6 +527,12 @@ class TradingEngine:
                     symbol, close_side, position.quantity
                 )
                 exit_price = float(order.get("average") or order.get("price") or exit_price)
+                # Recalculate PnL using the actual exchange fill price
+                if position.side == "BUY":
+                    pnl = (exit_price - position.entry_price) * position.quantity
+                else:
+                    pnl = (position.entry_price - exit_price) * position.quantity
+                pnl_percent = (pnl / cost_basis * 100) if cost_basis > 0 else 0.0
                 logger.info("Live close filled: %s %s qty=%.6f @ %.4f | PnL=%.2f",
                             close_side, symbol, position.quantity, exit_price, pnl)
             except Exception as exc:
@@ -705,6 +711,13 @@ class TradingEngine:
     async def start(self, settings: dict):
         if self.is_running:
             return
+        # Clear all in-memory state from any previous run to prevent stale data
+        self.active_positions.clear()
+        self.recent_signals.clear()
+        self.total_signals_today = 0
+        self.total_trades_today = 0
+        self.total_realized_pnl = 0.0
+        self.current_regimes.clear()
         self.paper_trading = settings.get("paper_trading_enabled", True)
         self.paper_balance = settings.get("paper_balance", 10000.0)
         self.active_symbols = settings.get("active_symbols", ["BTC/USDT", "ETH/USDT"])
@@ -743,6 +756,35 @@ class TradingEngine:
                 await self._main_loop_task
             except asyncio.CancelledError:
                 pass
+        # Close any open positions in the DB so they're never stuck as 'open' forever
+        if self.active_positions:
+            try:
+                async with AsyncSessionLocal() as session:
+                    for pos in self.active_positions.values():
+                        exit_px = self.market_prices.get(pos.symbol, pos.current_price)
+                        if pos.side == "BUY":
+                            pnl = (exit_px - pos.entry_price) * pos.quantity
+                        else:
+                            pnl = (pos.entry_price - exit_px) * pos.quantity
+                        cost = pos.entry_price * pos.quantity
+                        pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
+                        await session.execute(
+                            update(TradeRecord)
+                            .where(TradeRecord.id == pos.trade_id)
+                            .values(
+                                exit_price=round(exit_px, 8),
+                                profit_loss=round(pnl, 4),
+                                profit_loss_percent=round(pnl_pct, 4),
+                                status="closed",
+                                closed_at=datetime.utcnow(),
+                                exit_reason="bot_stopped",
+                            )
+                        )
+                    await session.commit()
+                logger.info("Closed %d open position(s) on engine stop", len(self.active_positions))
+            except Exception as exc:
+                logger.error("Failed to close open positions on stop: %s", exc)
+            self.active_positions.clear()
         if self.exchange:
             await self.exchange.close()
         logger.info("Trading engine stopped")
