@@ -513,25 +513,31 @@ class TradingEngine:
             "raw_signal_details": [s.details for s in es.raw_signals],
         }
 
-        async with AsyncSessionLocal() as session:
-            trade = TradeRecord(
-                symbol=es.symbol, side=es.direction, strategy=label,
-                entry_price=es.weighted_entry_price, quantity=fill_quantity,
-                stop_loss_price=es.suggested_stop_loss, take_profit_price=es.suggested_take_profit,
-                status="open", is_paper_trade=self.paper_trading,
-                notes=f"conf={es.final_confidence:.3f} regime={es.regime.value} boost={es.regime_boost}",
-                signal_features=json.dumps(ml_features),
-            )
-            session.add(trade)
-            await session.commit()
-            await session.refresh(trade)
-            position = ActivePosition(
-                trade_id=trade.id, symbol=es.symbol, side=es.direction, strategy=label,
-                entry_price=es.weighted_entry_price, quantity=fill_quantity,
-                stop_loss=es.suggested_stop_loss, take_profit=es.suggested_take_profit,
-            )
-            self.active_positions[es.symbol] = position
-            self.total_trades_today += 1
+        # Bug #1: register in-memory BEFORE DB write — a DB crash must never orphan a live exchange fill
+        position = ActivePosition(
+            trade_id=0, symbol=es.symbol, side=es.direction, strategy=label,
+            entry_price=es.weighted_entry_price, quantity=fill_quantity,
+            stop_loss=es.suggested_stop_loss, take_profit=es.suggested_take_profit,
+        )
+        self.active_positions[es.symbol] = position
+        self.total_trades_today += 1
+        try:
+            async with AsyncSessionLocal() as session:
+                trade = TradeRecord(
+                    symbol=es.symbol, side=es.direction, strategy=label,
+                    entry_price=es.weighted_entry_price, quantity=fill_quantity,
+                    stop_loss_price=es.suggested_stop_loss, take_profit_price=es.suggested_take_profit,
+                    status="open", is_paper_trade=self.paper_trading,
+                    notes=f"conf={es.final_confidence:.3f} regime={es.regime.value} boost={es.regime_boost}",
+                    signal_features=json.dumps(ml_features),
+                )
+                session.add(trade)
+                await session.commit()
+                await session.refresh(trade)
+                position.trade_id = trade.id
+        except Exception as _db_exc:
+            logger.error("DB write failed for %s entry — position tracked in memory without DB record: %s",
+                         es.symbol, _db_exc)
         self.recent_signals.insert(0, {"symbol": es.symbol, "strategy": label,
             "signal_type": es.direction, "strength": es.final_confidence,
             "price": es.weighted_entry_price, "timestamp": es.timestamp.isoformat(),
@@ -564,6 +570,7 @@ class TradingEngine:
 
     async def _check_exit_conditions(self):
         symbols_to_close = []
+        stop_updates: list[tuple[int, float]] = []  # (trade_id, new_stop_loss)
         # Bug #1: snapshot keys to prevent RuntimeError if main loop mutates dict while awaiting
         for symbol, position in list(self.active_positions.items()):
             if symbol not in self.active_symbols:
@@ -572,7 +579,11 @@ class TradingEngine:
                     self.market_prices[symbol] = fetched
             current_price = self.market_prices.get(symbol, position.current_price)
             position.current_price = current_price
+            _old_stop = position.stop_loss
             self._update_trailing_stop(position, current_price)
+            # Bug #4: capture changed stops for batch DB persist
+            if position.stop_loss != _old_stop and position.trade_id:
+                stop_updates.append((position.trade_id, position.stop_loss))
             should_close = False
             close_reason = ""
             if position.side == "BUY":
@@ -591,6 +602,19 @@ class TradingEngine:
                     close_reason = "take_profit"
             if should_close:
                 symbols_to_close.append((symbol, current_price, close_reason))
+        # Bug #4: batch-persist trailing stop changes so restarts load the tight stop, not the wide initial one
+        if stop_updates:
+            try:
+                async with AsyncSessionLocal() as _s:
+                    for _tid, _new_stop in stop_updates:
+                        await _s.execute(
+                            update(TradeRecord)
+                            .where(TradeRecord.id == _tid)
+                            .values(stop_loss_price=_new_stop)
+                        )
+                    await _s.commit()
+            except Exception as _exc:
+                logger.warning("Failed to persist trailing stop updates: %s", _exc)
         for symbol, exit_price, reason in symbols_to_close:
             await self._close_position(symbol, exit_price, reason)
 
@@ -660,6 +684,18 @@ class TradingEngine:
                     position.quantity = remaining_qty
                     logger.warning("Partial fill %s: %.6f closed, %.6f remaining — position stays active",
                                    symbol, closed_qty, remaining_qty)
+                    # Bug #3: sync reduced qty to DB so a restart loads the correct amount
+                    if position.trade_id:
+                        try:
+                            async with AsyncSessionLocal() as _s:
+                                await _s.execute(
+                                    update(TradeRecord)
+                                    .where(TradeRecord.id == position.trade_id)
+                                    .values(quantity=remaining_qty)
+                                )
+                                await _s.commit()
+                        except Exception as _db_exc:
+                            logger.error("Failed to sync partial fill qty for %s: %s", symbol, _db_exc)
                     return
                 self.active_positions.pop(symbol)
             except Exception as exc:
@@ -866,27 +902,45 @@ class TradingEngine:
                         await self._execute_ensemble_signal(result)
 
                 # Run Statistical Arbitrage separately — both legs must execute or neither does
-                # Bug #4: check slot capacity for ALL legs before executing any
                 pairs_legs = await self._run_pairs_signal()
                 if pairs_legs:
                     available = self.risk_manager.max_concurrent_positions - len(self.active_positions)
                     if available >= len(pairs_legs):
                         primary, *hedges = pairs_legs
-                        await self._execute_ensemble_signal(primary)
-                        # Bug #4: hedge legs copy primary USD value for exact delta-neutrality
-                        primary_pos = self.active_positions.get(primary.symbol)
-                        # Bug #3: if primary was rejected, block ALL hedges — naked hedges break arbitrage
-                        if primary_pos is None:
-                            logger.info("Pairs: primary leg %s not opened — all hedge legs skipped", primary.symbol)
+                        # Bug #2: pre-validate sizing for ALL legs before any API call
+                        _pv = self._compute_portfolio_value()
+                        self.risk_manager.update_peak_portfolio_value(_pv)
+                        _kelly = max((self.performance_tracker.get_kelly_fraction(s.strategy_name)
+                                      for s in primary.raw_signals), default=0.02)
+                        _pre = self.risk_manager.calculate_position_size(
+                            portfolio_value=_pv, entry_price=primary.weighted_entry_price,
+                            stop_loss_price=primary.suggested_stop_loss,
+                            signal_confidence=primary.final_confidence,
+                            open_positions_count=len(self.active_positions),
+                            open_symbols=list(self.active_positions.keys()),
+                            symbol=primary.symbol, side=primary.direction, kelly_fraction=_kelly,
+                        )
+                        _hedges_ok = _pre.allowed and all(
+                            h.weighted_entry_price > 0
+                            and (_pre.position_value / h.weighted_entry_price) * h.weighted_entry_price >= 5.0
+                            for h in hedges
+                        )
+                        if not _hedges_ok:
+                            logger.info("Pairs aborted: pre-validation failed — no legs executed")
                         else:
-                            for hedge in hedges:
-                                forced_qty = None
-                                if hedge.weighted_entry_price > 0:
-                                    forced_qty = round(
-                                        primary_pos.quantity * primary_pos.entry_price
-                                        / hedge.weighted_entry_price, 8
-                                    )
-                                await self._execute_ensemble_signal(hedge, forced_quantity=forced_qty)
+                            await self._execute_ensemble_signal(primary)
+                            primary_pos = self.active_positions.get(primary.symbol)
+                            if primary_pos is None:
+                                logger.info("Pairs: primary leg %s not opened — all hedge legs skipped", primary.symbol)
+                            else:
+                                for hedge in hedges:
+                                    forced_qty = None
+                                    if hedge.weighted_entry_price > 0:
+                                        forced_qty = round(
+                                            primary_pos.quantity * primary_pos.entry_price
+                                            / hedge.weighted_entry_price, 8
+                                        )
+                                    await self._execute_ensemble_signal(hedge, forced_quantity=forced_qty)
                     else:
                         logger.info("Pairs trade skipped: need %d free slots, only %d available",
                                     len(pairs_legs), available)
@@ -926,6 +980,22 @@ class TradingEngine:
         self.current_regimes.clear()
         self.paper_trading = settings.get("paper_trading_enabled", True)
         self.paper_balance = settings.get("paper_balance", 10000.0)
+        # Bug #5: restore today's realized PnL from DB so dashboard doesn't wipe on restart
+        try:
+            from sqlalchemy import func as _sa_func
+            async with AsyncSessionLocal() as _pnl_s:
+                _today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+                _r = await _pnl_s.execute(
+                    select(_sa_func.sum(TradeRecord.profit_loss)).where(
+                        TradeRecord.status == "closed",
+                        TradeRecord.is_paper_trade == self.paper_trading,
+                        TradeRecord.closed_at >= _today,
+                    )
+                )
+                self.total_realized_pnl = float(_r.scalar() or 0.0)
+                logger.info("Restored today's realized PnL: %.2f", self.total_realized_pnl)
+        except Exception as _exc:
+            logger.warning("Could not restore realized PnL on start: %s", _exc)
         # Reload any open positions left from a previous session (crash/restart recovery)
         try:
             async with AsyncSessionLocal() as _s:
