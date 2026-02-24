@@ -10,8 +10,8 @@ from sqlalchemy import update
 
 from models.database import TradeRecord, AsyncSessionLocal
 from engine.risk_manager import RiskManager
-from engine.regime_detector import MarketRegimeDetector
-from engine.signal_ensemble import SignalEnsemble
+from engine.regime_detector import MarketRegimeDetector, MarketRegime
+from engine.signal_ensemble import SignalEnsemble, EnsembleSignal
 from engine.strategy_performance_tracker import StrategyPerformanceTracker
 from engine.var_calculator import VaRCalculator
 from engine.sentiment_filter import SentimentFilter
@@ -536,6 +536,47 @@ class TradingEngine:
             "reason": reason,
         })
 
+    async def _run_pairs_signal(self) -> Optional["EnsembleSignal"]:
+        """Runs Statistical Arbitrage on the BTC/ETH spread.
+        Requires both BTC/USDT and ETH/USDT in active_symbols and 'pairs' in active_strategy_names."""
+        if "pairs" not in self.active_strategy_names:
+            return None
+        pairs_strategy = self._strategy_registry.get("pairs")
+        if not pairs_strategy or not pairs_strategy.enabled:
+            return None
+        btc_sym, eth_sym = "BTC/USDT", "ETH/USDT"
+        if btc_sym not in self.active_symbols or eth_sym not in self.active_symbols:
+            return None
+        btc_df = await self._fetch_ohlcv(btc_sym)
+        eth_df = await self._fetch_ohlcv(eth_sym)
+        if btc_df is None or eth_df is None:
+            return None
+        self.market_prices[btc_sym] = float(btc_df["close"].iloc[-1])
+        self.market_prices[eth_sym] = float(eth_df["close"].iloc[-1])
+        try:
+            signal = pairs_strategy.compute_signal_from_pair(btc_sym, btc_df, eth_df)
+        except Exception as exc:
+            logger.error("Pairs strategy error: %s", exc)
+            return None
+        if signal is None:
+            return None
+        self.total_signals_today += 1
+        regime_analysis = self.regime_detector.analyze(btc_df)
+        self.current_regimes[btc_sym] = regime_analysis.regime.value
+        return EnsembleSignal(
+            symbol=btc_sym,
+            direction=signal.signal_type,
+            composite_confidence=signal.strength,
+            agreeing_strategies=["Statistical Arbitrage"],
+            disagreeing_strategies=[],
+            weighted_entry_price=signal.price,
+            suggested_stop_loss=signal.suggested_stop_loss,
+            suggested_take_profit=signal.suggested_take_profit,
+            regime=regime_analysis.regime,
+            regime_boost=1.0,
+            raw_signals=[signal],
+        )
+
     def _compute_portfolio_value(self) -> float:
         position_value = sum(
             pos.current_price * pos.quantity for pos in self.active_positions.values()
@@ -584,6 +625,11 @@ class TradingEngine:
                 for result in results:
                     if result and not isinstance(result, Exception):
                         await self._execute_ensemble_signal(result)
+
+                # Run Statistical Arbitrage separately — it needs two symbols (BTC + ETH)
+                pairs_result = await self._run_pairs_signal()
+                if pairs_result and not isinstance(pairs_result, Exception):
+                    await self._execute_ensemble_signal(pairs_result)
 
                 # In standard mode, also check exits in this loop (HFT has dedicated loop)
                 if not self.hft_mode:
