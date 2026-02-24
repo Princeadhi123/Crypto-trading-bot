@@ -346,7 +346,7 @@ class TradingEngine:
                 regime_analysis.regime.value, ensemble_signal.agreeing_strategies)
         return ensemble_signal
 
-    async def _execute_ensemble_signal(self, es):
+    async def _execute_ensemble_signal(self, es, forced_quantity: float | None = None):
         # --- Sentiment macro filter ---
         try:
             sentiment = await self.sentiment_filter.fetch_current_sentiment()
@@ -384,6 +384,11 @@ class TradingEngine:
                 logger.info("Reversal %s: closing existing %s before opening %s",
                             es.symbol, existing_pos.side, es.direction)
                 await self._close_position(es.symbol, es.weighted_entry_price, "reversal")
+                # Bug #3: if close failed, position still exists — abort the reversal entry
+                # to avoid double exposure with the original trade still live on exchange
+                if es.symbol in self.active_positions:
+                    logger.warning("Reversal aborted for %s: close failed, original position still active", es.symbol)
+                    return
             else:
                 return
         # Live spot exchange: cannot open short positions — block SELL signals
@@ -395,12 +400,24 @@ class TradingEngine:
         self.risk_manager.update_peak_portfolio_value(portfolio_value)
         best_kelly = max((self.performance_tracker.get_kelly_fraction(s.strategy_name)
                          for s in es.raw_signals), default=0.02)
-        sizing = self.risk_manager.calculate_position_size(
-            portfolio_value=portfolio_value, entry_price=es.weighted_entry_price,
-            stop_loss_price=es.suggested_stop_loss, signal_confidence=adjusted_confidence,
-            open_positions_count=len(self.active_positions), open_symbols=open_symbols,
-            symbol=es.symbol, side=es.direction, kelly_fraction=best_kelly,
-        )
+        if forced_quantity is not None:
+            # Bug #4: pairs hedge leg bypasses risk manager to match primary leg's USD value
+            sizing = self.risk_manager.calculate_position_size(
+                portfolio_value=portfolio_value, entry_price=es.weighted_entry_price,
+                stop_loss_price=es.suggested_stop_loss, signal_confidence=adjusted_confidence,
+                open_positions_count=len(self.active_positions), open_symbols=open_symbols,
+                symbol=es.symbol, side=es.direction, kelly_fraction=best_kelly,
+            )
+            sizing.quantity = forced_quantity
+            sizing.position_value = forced_quantity * es.weighted_entry_price
+            sizing.allowed = True
+        else:
+            sizing = self.risk_manager.calculate_position_size(
+                portfolio_value=portfolio_value, entry_price=es.weighted_entry_price,
+                stop_loss_price=es.suggested_stop_loss, signal_confidence=adjusted_confidence,
+                open_positions_count=len(self.active_positions), open_symbols=open_symbols,
+                symbol=es.symbol, side=es.direction, kelly_fraction=best_kelly,
+            )
         if not sizing.allowed:
             logger.info("Rejected %s: %s", es.symbol, sizing.rejection_reason)
             return
@@ -540,7 +557,8 @@ class TradingEngine:
 
     async def _check_exit_conditions(self):
         symbols_to_close = []
-        for symbol, position in self.active_positions.items():
+        # Bug #1: snapshot keys to prevent RuntimeError if main loop mutates dict while awaiting
+        for symbol, position in list(self.active_positions.items()):
             if symbol not in self.active_symbols:
                 fetched = await self._fetch_current_price(symbol)
                 if fetched:
@@ -626,6 +644,13 @@ class TradingEngine:
                 pnl_percent = (pnl / cost_basis * 100) if cost_basis > 0 else 0.0
                 logger.info("Live close filled: %s %s qty=%.6f @ %.4f | PnL=%.2f",
                             close_side, symbol, closed_qty, exit_price, pnl)
+                # Bug #2: partial TWAP fill — leave remaining quantity active instead of orphaning it
+                remaining_qty = round(position.quantity - closed_qty, 10)
+                if remaining_qty > 0:
+                    position.quantity = remaining_qty
+                    logger.warning("Partial fill %s: %.6f closed, %.6f remaining — position stays active",
+                                   symbol, closed_qty, remaining_qty)
+                    return
                 self.active_positions.pop(symbol)
             except Exception as exc:
                 logger.error("Live close order failed for %s: %s — position remains active", symbol, exc)
@@ -836,8 +861,18 @@ class TradingEngine:
                 if pairs_legs:
                     available = self.risk_manager.max_concurrent_positions - len(self.active_positions)
                     if available >= len(pairs_legs):
-                        for pairs_leg in pairs_legs:
-                            await self._execute_ensemble_signal(pairs_leg)
+                        primary, *hedges = pairs_legs
+                        await self._execute_ensemble_signal(primary)
+                        # Bug #4: hedge legs copy primary USD value for exact delta-neutrality
+                        primary_pos = self.active_positions.get(primary.symbol)
+                        for hedge in hedges:
+                            forced_qty = None
+                            if primary_pos is not None and hedge.weighted_entry_price > 0:
+                                forced_qty = round(
+                                    primary_pos.quantity * primary_pos.entry_price
+                                    / hedge.weighted_entry_price, 8
+                                )
+                            await self._execute_ensemble_signal(hedge, forced_quantity=forced_qty)
                     else:
                         logger.info("Pairs trade skipped: need %d free slots, only %d available",
                                     len(pairs_legs), available)
@@ -980,6 +1015,12 @@ class TradingEngine:
                         pnl -= fee
                         cost = pos.entry_price * pos.quantity
                         pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
+                        # Bug #5: refund paper balance when bot stops with open positions
+                        if self.paper_trading:
+                            if pos.side == "BUY":
+                                self.paper_balance += exit_px * pos.quantity - fee
+                            else:
+                                self.paper_balance += (pos.entry_price * pos.quantity) + pnl
                         await session.execute(
                             update(TradeRecord)
                             .where(TradeRecord.id == pos.trade_id)
@@ -991,6 +1032,13 @@ class TradingEngine:
                                 closed_at=datetime.utcnow(),
                                 exit_reason="bot_stopped",
                             )
+                        )
+                    # Bug #5: persist the updated paper balance so it survives restart
+                    if self.paper_trading:
+                        await session.execute(
+                            update(BotSettings)
+                            .where(BotSettings.id == 1)
+                            .values(paper_balance=round(self.paper_balance, 8))
                         )
                     await session.commit()
                 logger.info("Closed %d open position(s) on engine stop", len(self.active_positions))
