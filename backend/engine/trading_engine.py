@@ -312,7 +312,10 @@ class TradingEngine:
         ohlcv_data = await self._fetch_ohlcv(symbol)
         if ohlcv_data is None:
             return None
-        self.market_prices[symbol] = float(ohlcv_data["close"].iloc[-1])
+        # Only update market_prices from OHLCV in live mode
+        # In paper mode, preserve live prices from background refresh loop
+        if not self.paper_trading:
+            self.market_prices[symbol] = float(ohlcv_data["close"].iloc[-1])
         regime_analysis = self.regime_detector.analyze(ohlcv_data)
         self.current_regimes[symbol] = regime_analysis.regime.value
         regime_weights = self.regime_detector.get_strategy_weights(regime_analysis)
@@ -780,8 +783,11 @@ class TradingEngine:
                   or await self._fetch_ohlcv(eth_sym))
         if btc_df is None or eth_df is None:
             return []
-        self.market_prices[btc_sym] = float(btc_df["close"].iloc[-1])
-        self.market_prices[eth_sym] = float(eth_df["close"].iloc[-1])
+        # Only update market_prices from OHLCV in live mode
+        # In paper mode, preserve live prices from background refresh loop
+        if not self.paper_trading:
+            self.market_prices[btc_sym] = float(btc_df["close"].iloc[-1])
+            self.market_prices[eth_sym] = float(eth_df["close"].iloc[-1])
         try:
             signal = pairs_strategy.compute_signal_from_pair(btc_sym, btc_df, eth_df)
         except Exception as exc:
