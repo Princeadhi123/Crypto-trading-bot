@@ -159,7 +159,7 @@ class TradingEngine:
             await self._broadcast_callback(event_type, data)
 
     async def load_initial_balance(self):
-        """Load paper balance from database on startup so dashboard shows correct value before bot starts."""
+        """Load paper balance and realized PnL from database on startup so dashboard shows correct values before bot starts."""
         try:
             async with AsyncSessionLocal() as session:
                 result = await session.execute(select(BotSettings).where(BotSettings.id == 1))
@@ -169,6 +169,21 @@ class TradingEngine:
                     logger.info("Loaded initial paper balance from DB: $%.2f", self.paper_balance)
         except Exception as exc:
             logger.warning("Failed to load initial balance from DB: %s — using default $10,000", exc)
+        
+        # Load all-time realized PnL (cumulative from all closed trades)
+        try:
+            from sqlalchemy import func as _sa_func
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(_sa_func.sum(TradeRecord.profit_loss)).where(
+                        TradeRecord.status == "closed",
+                        TradeRecord.is_paper_trade == self.paper_trading,
+                    )
+                )
+                self.total_realized_pnl = float(result.scalar() or 0.0)
+                logger.info("Loaded all-time realized PnL from DB: $%.2f", self.total_realized_pnl)
+        except Exception as exc:
+            logger.warning("Failed to load realized PnL from DB: %s — using default $0.00", exc)
 
     async def initialize_exchange(self, exchange_name: str, api_key: str = "", api_secret: str = ""):
         try:
@@ -1015,20 +1030,18 @@ class TradingEngine:
         self.current_regimes.clear()
         self.paper_trading = settings.get("paper_trading_enabled", True)
         self.paper_balance = settings.get("paper_balance", 10000.0)
-        # Bug #5: restore today's realized PnL from DB so dashboard doesn't wipe on restart
+        # Bug #5: restore all-time realized PnL from DB so dashboard doesn't wipe on restart
         try:
             from sqlalchemy import func as _sa_func
             async with AsyncSessionLocal() as _pnl_s:
-                _today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
                 _r = await _pnl_s.execute(
                     select(_sa_func.sum(TradeRecord.profit_loss)).where(
                         TradeRecord.status == "closed",
                         TradeRecord.is_paper_trade == self.paper_trading,
-                        TradeRecord.closed_at >= _today,
                     )
                 )
                 self.total_realized_pnl = float(_r.scalar() or 0.0)
-                logger.info("Restored today's realized PnL: %.2f", self.total_realized_pnl)
+                logger.info("Restored all-time realized PnL: %.2f", self.total_realized_pnl)
         except Exception as _exc:
             logger.warning("Could not restore realized PnL on start: %s", _exc)
         # Reload any open positions left from a previous session (crash/restart recovery)
