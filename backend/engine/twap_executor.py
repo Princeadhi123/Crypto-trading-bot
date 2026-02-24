@@ -139,18 +139,21 @@ class TwapExecutor:
                     fill_price = float(
                         live_order.get("average") or live_order.get("price") or current_price
                     )
+                    # Use actual filled qty (may differ from requested due to spot fee deduction)
+                    slice_filled_qty = float(live_order.get("filled") or slice_order.quantity)
                 else:
                     # Simulate realistic slippage
                     direction_mult = 1.0 if order.side == "BUY" else -1.0
                     slippage = current_price * slippage_factor * direction_mult * random.uniform(0.5, 1.5)
                     fill_price = current_price + slippage
+                    slice_filled_qty = slice_order.quantity
 
                 slice_order.executed = True
                 slice_order.fill_price = round(fill_price, 8)
                 slice_order.executed_at = datetime.utcnow()
 
-                total_value += fill_price * slice_order.quantity
-                total_qty_filled += slice_order.quantity
+                total_value += fill_price * slice_filled_qty
+                total_qty_filled += slice_filled_qty
 
                 logger.info("TWAP slice %d/%d filled: %s %s %.6f @ %.4f",
                             i + 1, order.total_slices, order.side, order.symbol,

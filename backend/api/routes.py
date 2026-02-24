@@ -256,15 +256,21 @@ async def toggle_strategy(strategy_id: str):
 async def get_pnl_chart_data(days: int = Query(default=30, ge=1, le=365), session: AsyncSession = Depends(get_db_session)):
     since = datetime.utcnow() - timedelta(days=days)
     is_paper = trading_engine.paper_trading
+    base_filter = and_(TradeRecord.status == "closed", TradeRecord.is_paper_trade == is_paper)
+    # Bug #6: Fetch historical PnL before the window as equity baseline so chart
+    # continues from the correct watermark instead of always restarting at 0
+    baseline_result = await session.execute(
+        select(func.coalesce(func.sum(TradeRecord.profit_loss), 0.0))
+        .where(and_(base_filter, TradeRecord.closed_at < since))
+    )
+    cumulative_pnl = float(baseline_result.scalar_one())
     result = await session.execute(
         select(TradeRecord)
-        .where(TradeRecord.status == "closed")
-        .where(TradeRecord.is_paper_trade == is_paper)
+        .where(base_filter)
         .where(TradeRecord.closed_at >= since)
         .order_by(TradeRecord.closed_at)
     )
     trades = result.scalars().all()
-    cumulative_pnl = 0.0
     chart_data = []
     for trade in trades:
         cumulative_pnl += trade.profit_loss or 0

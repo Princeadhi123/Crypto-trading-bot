@@ -413,6 +413,13 @@ class TradingEngine:
                     return
             except Exception:
                 pass
+            # Bug #5: Re-validate MIN_NOTIONAL after precision step-size rounding
+            post_precision_value = sizing.quantity * es.weighted_entry_price
+            if post_precision_value < 5.0:
+                logger.warning("Rejected %s: post-precision value $%.2f below MIN_NOTIONAL $5.00",
+                                es.symbol, post_precision_value)
+                return
+        fill_quantity = sizing.quantity  # Bug #2: updated to actual exchange fill below
         if self.paper_trading:
             if self.paper_balance < sizing.position_value:
                 return
@@ -430,12 +437,15 @@ class TradingEngine:
                         twap_order, self._fetch_current_price, exchange=self.exchange
                     )
                     actual_price = twap_order.avg_fill_price or es.weighted_entry_price
+                    fill_quantity = twap_order.total_filled or sizing.quantity
                 else:
                     order = await self.exchange.create_market_order(
                         es.symbol, order_side, sizing.quantity
                     )
                     actual_price = float(order.get("average") or order.get("price") or es.weighted_entry_price)
-                logger.info("Live order filled: %s %s qty=%.6f @ %.4f", es.direction, es.symbol, sizing.quantity, actual_price)
+                    # Spot BUY: fee is deducted from received asset, so actual qty may be less
+                    fill_quantity = float(order.get("filled") or sizing.quantity)
+                logger.info("Live order filled: %s %s qty=%.6f @ %.4f", es.direction, es.symbol, fill_quantity, actual_price)
                 es = EnsembleSignal(
                     symbol=es.symbol, direction=es.direction,
                     composite_confidence=es.composite_confidence,
@@ -479,7 +489,7 @@ class TradingEngine:
         async with AsyncSessionLocal() as session:
             trade = TradeRecord(
                 symbol=es.symbol, side=es.direction, strategy=label,
-                entry_price=es.weighted_entry_price, quantity=sizing.quantity,
+                entry_price=es.weighted_entry_price, quantity=fill_quantity,
                 stop_loss_price=es.suggested_stop_loss, take_profit_price=es.suggested_take_profit,
                 status="open", is_paper_trade=self.paper_trading,
                 notes=f"conf={es.final_confidence:.3f} regime={es.regime.value} boost={es.regime_boost}",
@@ -490,7 +500,7 @@ class TradingEngine:
             await session.refresh(trade)
             position = ActivePosition(
                 trade_id=trade.id, symbol=es.symbol, side=es.direction, strategy=label,
-                entry_price=es.weighted_entry_price, quantity=sizing.quantity,
+                entry_price=es.weighted_entry_price, quantity=fill_quantity,
                 stop_loss=es.suggested_stop_loss, take_profit=es.suggested_take_profit,
             )
             self.active_positions[es.symbol] = position
@@ -650,36 +660,37 @@ class TradingEngine:
             "reason": reason,
         })
 
-    async def _run_pairs_signal(self) -> Optional["EnsembleSignal"]:
+    async def _run_pairs_signal(self) -> list["EnsembleSignal"]:
         """Runs Statistical Arbitrage on the BTC/ETH spread.
-        Requires both BTC/USDT and ETH/USDT in active_symbols and 'pairs' in active_strategy_names."""
+        Returns [btc_signal, eth_hedge_signal] for a delta-neutral pairs trade.
+        The hedge leg direction is opposite to the primary leg."""
         if "pairs" not in self.active_strategy_names:
-            return None
+            return []
         pairs_strategy = self._strategy_registry.get("pairs")
         if not pairs_strategy or not pairs_strategy.enabled:
-            return None
+            return []
         btc_sym, eth_sym = "BTC/USDT", "ETH/USDT"
         if btc_sym not in self.active_symbols or eth_sym not in self.active_symbols:
-            return None
+            return []
         btc_df = (self.ohlcv_cache.get(f"{btc_sym}_{self._active_timeframe}")
                   or await self._fetch_ohlcv(btc_sym))
         eth_df = (self.ohlcv_cache.get(f"{eth_sym}_{self._active_timeframe}")
                   or await self._fetch_ohlcv(eth_sym))
         if btc_df is None or eth_df is None:
-            return None
+            return []
         self.market_prices[btc_sym] = float(btc_df["close"].iloc[-1])
         self.market_prices[eth_sym] = float(eth_df["close"].iloc[-1])
         try:
             signal = pairs_strategy.compute_signal_from_pair(btc_sym, btc_df, eth_df)
         except Exception as exc:
             logger.error("Pairs strategy error: %s", exc)
-            return None
+            return []
         if signal is None:
-            return None
+            return []
         self.total_signals_today += 1
         regime_analysis = self.regime_detector.analyze(btc_df)
         self.current_regimes[btc_sym] = regime_analysis.regime.value
-        return EnsembleSignal(
+        btc_signal = EnsembleSignal(
             symbol=btc_sym,
             direction=signal.signal_type,
             composite_confidence=signal.strength,
@@ -692,6 +703,31 @@ class TradingEngine:
             regime_boost=1.0,
             raw_signals=[signal],
         )
+        # Bug #3: Build the ETH hedge leg (opposite direction = delta-neutral)
+        hedge_dir = "SELL" if signal.signal_type == "BUY" else "BUY"
+        eth_price = float(eth_df["close"].iloc[-1])
+        sl_pct = abs(signal.price - signal.suggested_stop_loss) / signal.price if signal.price > 0 else 0.02
+        tp_pct = abs(signal.suggested_take_profit - signal.price) / signal.price if signal.price > 0 else 0.04
+        if hedge_dir == "BUY":
+            eth_sl = eth_price * (1 - sl_pct)
+            eth_tp = eth_price * (1 + tp_pct)
+        else:
+            eth_sl = eth_price * (1 + sl_pct)
+            eth_tp = eth_price * (1 - tp_pct)
+        eth_signal = EnsembleSignal(
+            symbol=eth_sym,
+            direction=hedge_dir,
+            composite_confidence=signal.strength,
+            agreeing_strategies=["Statistical Arbitrage"],
+            disagreeing_strategies=[],
+            weighted_entry_price=round(eth_price, 8),
+            suggested_stop_loss=round(eth_sl, 8),
+            suggested_take_profit=round(eth_tp, 8),
+            regime=regime_analysis.regime,
+            regime_boost=1.0,
+            raw_signals=[signal],
+        )
+        return [btc_signal, eth_signal]
 
     def _compute_portfolio_value(self) -> float:
         position_value = 0.0
@@ -762,10 +798,9 @@ class TradingEngine:
                     if result and not isinstance(result, Exception):
                         await self._execute_ensemble_signal(result)
 
-                # Run Statistical Arbitrage separately — it needs two symbols (BTC + ETH)
-                pairs_result = await self._run_pairs_signal()
-                if pairs_result and not isinstance(pairs_result, Exception):
-                    await self._execute_ensemble_signal(pairs_result)
+                # Run Statistical Arbitrage separately — executes both BTC leg and ETH hedge leg
+                for pairs_leg in await self._run_pairs_signal():
+                    await self._execute_ensemble_signal(pairs_leg)
 
                 # In standard mode, also check exits in this loop (HFT has dedicated loop)
                 if not self.hft_mode:
@@ -934,6 +969,13 @@ class TradingEngine:
         # --- Safe to hot-reload: active symbols (only add new ones; keep existing positions) ---
         new_symbols = settings.get("active_symbols", self.active_symbols)
         if set(new_symbols) != set(self.active_symbols):
+            # Bug #4: clear OHLCV cache for removed symbols so _fetch_current_price
+            # falls back to live fetch_ticker instead of returning stale cached price
+            removed = set(self.active_symbols) - set(new_symbols)
+            for sym in removed:
+                for cache_key in [k for k in list(self.ohlcv_cache.keys()) if k.startswith(f"{sym}_")]:
+                    self.ohlcv_cache.pop(cache_key, None)
+                    self._ohlcv_cache_time.pop(cache_key, None)
             self.active_symbols = list(new_symbols)
             applied.append("active_symbols")
 
