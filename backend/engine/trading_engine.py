@@ -398,6 +398,23 @@ class TradingEngine:
         if not self.paper_trading and self.exchange is not None and es.direction == "SELL":
             logger.warning("Blocked SELL %s: spot exchange cannot open short positions", es.symbol)
             return
+        # In paper trading, snap entry price to live market price so SL/TP are relative
+        # to actual market, not simulated OHLCV price — prevents immediate stop-loss hits
+        if self.paper_trading:
+            _live_px = self.market_prices.get(es.symbol)
+            if _live_px and _live_px > 0 and es.weighted_entry_price > 0:
+                _scale = _live_px / es.weighted_entry_price
+                es = EnsembleSignal(
+                    symbol=es.symbol, direction=es.direction,
+                    composite_confidence=es.composite_confidence,
+                    agreeing_strategies=es.agreeing_strategies,
+                    disagreeing_strategies=es.disagreeing_strategies,
+                    weighted_entry_price=_live_px,
+                    suggested_stop_loss=round(es.suggested_stop_loss * _scale, 8),
+                    suggested_take_profit=round(es.suggested_take_profit * _scale, 8),
+                    regime=es.regime, regime_boost=es.regime_boost,
+                    raw_signals=es.raw_signals,
+                )
         open_symbols = list(self.active_positions.keys())
         portfolio_value = self._compute_portfolio_value()
         self.risk_manager.update_peak_portfolio_value(portfolio_value)
@@ -777,10 +794,10 @@ class TradingEngine:
         btc_sym, eth_sym = "BTC/USDT", "ETH/USDT"
         if btc_sym not in self.active_symbols or eth_sym not in self.active_symbols:
             return []
-        btc_df = (self.ohlcv_cache.get(f"{btc_sym}_{self._active_timeframe}")
-                  or await self._fetch_ohlcv(btc_sym))
-        eth_df = (self.ohlcv_cache.get(f"{eth_sym}_{self._active_timeframe}")
-                  or await self._fetch_ohlcv(eth_sym))
+        _btc_cached = self.ohlcv_cache.get(f"{btc_sym}_{self._active_timeframe}")
+        btc_df = _btc_cached if _btc_cached is not None else await self._fetch_ohlcv(btc_sym)
+        _eth_cached = self.ohlcv_cache.get(f"{eth_sym}_{self._active_timeframe}")
+        eth_df = _eth_cached if _eth_cached is not None else await self._fetch_ohlcv(eth_sym)
         if btc_df is None or eth_df is None:
             return []
         # Only update market_prices from OHLCV in live mode
