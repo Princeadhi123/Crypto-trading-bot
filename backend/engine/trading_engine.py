@@ -486,8 +486,13 @@ class TradingEngine:
         pnl_percent = (pnl / cost_basis * 100) if cost_basis > 0 else 0.0
 
         if self.paper_trading:
-            proceeds = exit_price * position.quantity
-            self.paper_balance += proceeds
+            if position.side == "BUY":
+                # Long: receive sale proceeds
+                self.paper_balance += exit_price * position.quantity
+            else:
+                # Short: return margin deposit (entry_price * qty) plus any PnL
+                # PnL = (entry_price - exit_price) * qty, so net = (2*entry - exit) * qty
+                self.paper_balance += (position.entry_price * position.quantity) + pnl
 
         self.total_realized_pnl += pnl
 
