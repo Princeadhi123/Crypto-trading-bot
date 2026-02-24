@@ -431,7 +431,7 @@ class TradingEngine:
                 portfolio_value_now = self._compute_portfolio_value()
                 if sizing.position_value >= portfolio_value_now * TWAP_THRESHOLD_PCT:
                     twap_order = self.twap_executor.create_order(
-                        es.symbol, order_side, sizing.quantity
+                        es.symbol, order_side, sizing.quantity, exchange=self.exchange
                     )
                     twap_order = await self.twap_executor.execute_order(
                         twap_order, self._fetch_current_price, exchange=self.exchange
@@ -585,28 +585,43 @@ class TradingEngine:
 
         if self.paper_trading:
             if position.side == "BUY":
-                # Long: receive sale proceeds
-                self.paper_balance += exit_price * position.quantity
+                # Long: receive sale proceeds minus fees (Bug #5: fee must be deducted from balance)
+                self.paper_balance += exit_price * position.quantity - fee
             else:
-                # Short: return margin deposit (entry_price * qty) plus any PnL
+                # Short: return margin deposit (entry_price * qty) plus PnL (already fee-adjusted)
                 self.paper_balance += (position.entry_price * position.quantity) + pnl
             self.active_positions.pop(symbol)
         elif self.exchange is not None:
             # Live trading: only remove position AFTER exchange confirms fill
             try:
                 close_side = "sell" if position.side == "BUY" else "buy"
-                order = await self.exchange.create_market_order(
-                    symbol, close_side, position.quantity
-                )
-                exit_price = float(order.get("average") or order.get("price") or exit_price)
-                # Recalculate PnL using the actual exchange fill price
-                if position.side == "BUY":
-                    pnl = (exit_price - position.entry_price) * position.quantity
+                close_value = exit_price * position.quantity
+                # Bug #2: route large exits through TWAP to avoid slippage dump
+                if close_value >= self._compute_portfolio_value() * TWAP_THRESHOLD_PCT:
+                    twap_order = self.twap_executor.create_order(
+                        symbol, close_side, position.quantity, exchange=self.exchange
+                    )
+                    twap_order = await self.twap_executor.execute_order(
+                        twap_order, self._fetch_current_price, exchange=self.exchange
+                    )
+                    exit_price = twap_order.avg_fill_price or exit_price
+                    closed_qty = twap_order.total_filled or position.quantity
                 else:
-                    pnl = (position.entry_price - exit_price) * position.quantity
+                    order = await self.exchange.create_market_order(
+                        symbol, close_side, position.quantity
+                    )
+                    exit_price = float(order.get("average") or order.get("price") or exit_price)
+                    closed_qty = float(order.get("filled") or position.quantity)
+                # Recalculate PnL using the actual exchange fill price and closed qty
+                if position.side == "BUY":
+                    pnl = (exit_price - position.entry_price) * closed_qty
+                else:
+                    pnl = (position.entry_price - exit_price) * closed_qty
+                fee = (position.entry_price + exit_price) * closed_qty * TRADE_FEE_RATE
+                pnl -= fee
                 pnl_percent = (pnl / cost_basis * 100) if cost_basis > 0 else 0.0
                 logger.info("Live close filled: %s %s qty=%.6f @ %.4f | PnL=%.2f",
-                            close_side, symbol, position.quantity, exit_price, pnl)
+                            close_side, symbol, closed_qty, exit_price, pnl)
                 self.active_positions.pop(symbol)
             except Exception as exc:
                 logger.error("Live close order failed for %s: %s — position remains active", symbol, exc)
@@ -665,6 +680,11 @@ class TradingEngine:
         Returns [btc_signal, eth_hedge_signal] for a delta-neutral pairs trade.
         The hedge leg direction is opposite to the primary leg."""
         if "pairs" not in self.active_strategy_names:
+            return []
+        # Bug #3: delta-neutral pairs trading requires short-selling the hedge leg.
+        # Spot exchanges cannot short — disable pairs entirely in live spot mode.
+        if not self.paper_trading and self.exchange is not None:
+            logger.warning("Pairs trading skipped: short selling not supported on live spot exchange")
             return []
         pairs_strategy = self._strategy_registry.get("pairs")
         if not pairs_strategy or not pairs_strategy.enabled:

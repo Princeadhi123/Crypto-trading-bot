@@ -74,10 +74,18 @@ class TwapExecutor:
         total_quantity: float,
         slices: Optional[int] = None,
         interval_seconds: Optional[float] = None,
+        exchange=None,
     ) -> TwapOrder:
         n_slices = slices or self.default_slices
         interval = interval_seconds or self.default_interval_seconds
-        slice_qty = total_quantity / n_slices
+        raw_slice_qty = total_quantity / n_slices
+        # Bug #1: apply exchange lot-size precision to every slice to prevent InvalidOrder
+        if exchange is not None:
+            try:
+                raw_slice_qty = float(exchange.amount_to_precision(symbol, raw_slice_qty))
+            except Exception:
+                pass
+        slice_qty = raw_slice_qty
 
         now = datetime.utcnow()
         base_time = datetime(now.year, now.month, now.day, now.hour, now.minute, now.second)
@@ -143,7 +151,7 @@ class TwapExecutor:
                     slice_filled_qty = float(live_order.get("filled") or slice_order.quantity)
                 else:
                     # Simulate realistic slippage
-                    direction_mult = 1.0 if order.side == "BUY" else -1.0
+                    direction_mult = 1.0 if order.side.upper() == "BUY" else -1.0
                     slippage = current_price * slippage_factor * direction_mult * random.uniform(0.5, 1.5)
                     fill_price = current_price + slippage
                     slice_filled_qty = slice_order.quantity

@@ -23,8 +23,8 @@ def _settings_row_to_dict(row: BotSettings) -> dict:
         "default_stop_loss_percent": row.default_stop_loss_percent,
         "default_take_profit_percent": row.default_take_profit_percent,
         "max_concurrent_positions": row.max_concurrent_positions,
-        "active_strategies": row.active_strategies.split(",") if row.active_strategies else [],
-        "active_symbols": row.active_symbols.split(",") if row.active_symbols else [],
+        "active_strategies": [s for s in row.active_strategies.split(",") if s] if row.active_strategies else [],
+        "active_symbols": [s for s in row.active_symbols.split(",") if s] if row.active_symbols else [],
         "hft_mode": getattr(row, "hft_mode", False),
     }
 
