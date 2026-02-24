@@ -949,7 +949,7 @@ class TradingEngine:
                             for h in hedges
                         )
                         if not _hedges_ok:
-                            logger.info("Pairs aborted: pre-validation failed — no legs executed")
+                            logger.debug("Pairs aborted: pre-validation failed — no legs executed")
                         else:
                             await self._execute_ensemble_signal(primary)
                             primary_pos = self.active_positions.get(primary.symbol)
