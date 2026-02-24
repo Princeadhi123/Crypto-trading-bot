@@ -346,11 +346,16 @@ async def get_ml_training_data(session: AsyncSession = Depends(get_db_session)):
         }
         rows.append(flat_row)
 
+    # Bug #7: derive the canonical feature header from the union of ALL row keys
+    # so a corrupted/empty first signal_features blob never strips ML columns.
+    all_keys: dict[str, None] = {}
+    for row in rows:
+        all_keys.update(dict.fromkeys(row.keys()))
     return {
         "total_samples": len(rows),
         "positive_samples": sum(r["profitable"] for r in rows),
         "negative_samples": sum(1 - r["profitable"] for r in rows),
-        "features": list(rows[0].keys()) if rows else [],
+        "features": list(all_keys.keys()),
         "data": rows,
         "note": "Use this dataset to train XGBoost once you have 500+ samples. Target: 'profitable'. Drop: trade_id, entry_price, exit_price, profit_loss, profit_loss_percent.",
     }
