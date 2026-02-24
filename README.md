@@ -193,6 +193,52 @@ The bot enforces multiple layers of protection:
 
 ---
 
+## Recent Bug Fixes & Improvements
+
+### Session: Feb 24, 2026
+
+**Critical Production Bugs Fixed:**
+
+1. **DB Commit Crash After Live Order Orphans Trade**
+   - Fixed: ActivePosition now tracked in memory before DB commit
+   - Impact: Prevents orphaned live trades if database write fails
+
+2. **Pairs Naked Exposure Pre-validation**
+   - Fixed: Pre-validates sizing for both legs before executing any API calls
+   - Impact: Prevents naked hedge exposure if primary leg fails minimum notional
+
+3. **Partial TWAP Fill Skips DB Update**
+   - Fixed: Persists partial fill reduced quantity to DB before returning
+   - Impact: Prevents PnL desync and position amnesia on restart
+
+4. **Trailing Stop Lost on Restart**
+   - Fixed: Batches trailing stop loss updates to DB after exit condition checks
+   - Impact: Preserves trailing stops across bot restarts
+
+5. **Total Realized PnL Wiped on Restart**
+   - Fixed: Aggregates today's closed PnL from DB on startup
+   - Impact: Dashboard realized PnL persists across sessions
+
+6. **Price Jump on Bot Start (Simulated OHLCV Overwriting Live Prices)**
+   - Fixed: Don't overwrite `market_prices` with simulated OHLCV close in paper mode
+   - Impact: Paper trading now tracks real market prices from background refresh loop
+
+7. **Stop-Loss Death Spiral (Paper Entry Price Mismatch)**
+   - Fixed: Snap paper entry price to live market price before sizing
+   - Impact: Prevents immediate stop-loss hits due to simulated vs live price discrepancy
+
+8. **DataFrame Ambiguity Crash After Hot-Reload**
+   - Fixed: Replace DataFrame `or` operator with explicit `is not None` checks
+   - Impact: Prevents "truth value of DataFrame is ambiguous" crash in pairs trading
+
+9. **Pairs Pre-validation Abort Log Spam**
+   - Fixed: Downgraded log level from INFO to DEBUG
+   - Impact: Reduces noise when portfolio is in drawdown and risk manager blocks trades
+
+**All fixes committed and tested in production.**
+
+---
+
 ## API Endpoints
 
 | Method | Endpoint | Description |
