@@ -1,6 +1,6 @@
 # CryptoBot Pro — Automated Crypto Trading Bot
 
-A full end-to-end automated cryptocurrency trading bot with a modern React dashboard.
+A full end-to-end automated cryptocurrency trading bot with a modern React dashboard, institutional-grade signal logic, and advanced risk management.
 
 > ⚠️ **RISK DISCLAIMER**: Cryptocurrency trading involves significant financial risk. This bot operates in **Paper Trading mode by default** (no real money). Past performance does not guarantee future results. Never trade more than you can afford to lose.
 
@@ -8,46 +8,70 @@ A full end-to-end automated cryptocurrency trading bot with a modern React dashb
 
 ## Features
 
-- **4 Trading Strategies**: RSI Mean Reversion, MACD Momentum, Bollinger Bands, EMA Scalping
-- **Automatic Trade Execution**: Signals → Risk Check → Execute → Monitor → Close
+- **5 Trading Strategies**: RSI Mean Reversion, MACD Momentum, Bollinger Bands, EMA Scalping, Statistical Arbitrage (Pairs Trading)
+- **Signal Ensemble**: Multi-strategy majority-vote aggregation — only fires when independent strategies agree
+- **Market Regime Detection**: ADX + ATR-based classifier routes capital to the correct strategy type for current conditions (Trending / Ranging / High-Vol / Low-Vol)
+- **Sentiment Filter**: Crypto Fear & Greed Index overlay — blocks BUY signals during Extreme Greed and SELL signals during Extreme Fear
+- **Funding Rate Signal**: Perpetual futures crowding detector — blocks trades fighting extreme funding and boosts aligned ones
+- **TWAP Execution**: Splits large orders into time-sliced tranches to minimize market impact
+- **VaR / CVaR Risk Reporting**: Historical simulation Value at Risk (95% & 99%), Expected Shortfall, Sharpe & Sortino ratios
+- **Strategy Performance Tracker**: Rolling Sharpe, Kelly Criterion position sizing, and dynamic capital weight allocation per strategy
+- **Automatic Trade Execution**: Signals → Ensemble → Sentiment/Funding filters → Risk Check → TWAP Execute → Monitor → Close
 - **Full Risk Management**: Per-trade risk sizing, max drawdown circuit breaker, stop-loss/take-profit
 - **Paper Trading Mode**: Test safely with virtual $10,000 before going live
 - **Real-time Dashboard**: Live prices, open positions, P&L charts via WebSocket
 - **100+ Exchange Support**: Binance, Coinbase, Kraken, OKX, Bybit and more (via CCXT)
 - **Trade History**: Full paginated log with filtering
-- **Strategy Analytics**: Per-strategy win rate, P&L, trade distribution
+- **Analytics Page**: Per-strategy win rate, P&L, rolling Sharpe, Kelly fraction, dynamic weights
 
 ---
 
 ## Project Structure
 
 ```
-├── backend/               # Python FastAPI trading engine
-│   ├── main.py            # FastAPI app + WebSocket server
+├── backend/                        # Python FastAPI trading engine
+│   ├── main.py                     # FastAPI app + WebSocket server
 │   ├── engine/
-│   │   ├── trading_engine.py    # Core trading loop
-│   │   ├── risk_manager.py      # Position sizing & risk rules
+│   │   ├── trading_engine.py       # Core trading loop
+│   │   ├── risk_manager.py         # Position sizing & risk rules
+│   │   ├── signal_ensemble.py      # Multi-strategy consensus aggregator
+│   │   ├── regime_detector.py      # ADX/ATR market regime classifier
+│   │   ├── sentiment_filter.py     # Fear & Greed Index macro filter
+│   │   ├── funding_rate_signal.py  # Perpetual futures funding rate signal
+│   │   ├── twap_executor.py        # TWAP order execution algorithm
+│   │   ├── var_calculator.py       # VaR / CVaR / Sharpe / Sortino
+│   │   ├── strategy_performance_tracker.py  # Rolling Sharpe + Kelly + dynamic weights
 │   │   └── strategies/
+│   │       ├── base_strategy.py
 │   │       ├── rsi_strategy.py
 │   │       ├── macd_strategy.py
 │   │       ├── bollinger_strategy.py
-│   │       └── scalping_strategy.py
-│   ├── api/routes.py      # REST API endpoints
-│   ├── models/            # Database models & schemas
+│   │       ├── scalping_strategy.py
+│   │       └── pairs_strategy.py   # Statistical Arbitrage (BTC/ETH spread)
+│   ├── api/routes.py               # REST API endpoints
+│   ├── models/                     # Database models & schemas
 │   ├── requirements.txt
-│   └── .env.example       # Copy to .env and configure
-└── frontend/              # React + TailwindCSS dashboard
-    ├── src/
-    │   ├── pages/         # Dashboard, Strategies, Portfolio, Trades, Settings
-    │   └── hooks/         # WebSocket hook
-    └── package.json
+│   └── .env.example                # Copy to .env and configure
+├── frontend/                       # React + TailwindCSS dashboard
+│   ├── src/
+│   │   ├── pages/                  # Dashboard, Strategies, Portfolio, Trades, Analytics, Settings
+│   │   └── hooks/                  # WebSocket hook
+│   └── package.json
+├── start-backend.bat               # Windows one-click backend launcher
+└── start-frontend.bat              # Windows one-click frontend launcher
 ```
 
 ---
 
 ## Quick Start
 
-### 1. Backend Setup
+### Windows (One-Click)
+
+Double-click `start-backend.bat` in one terminal and `start-frontend.bat` in another. Both scripts handle venv creation, dependency installation, and `.env` setup automatically.
+
+### Manual Setup
+
+#### 1. Backend
 
 ```bash
 cd backend
@@ -68,7 +92,7 @@ copy .env.example .env       # Windows
 python main.py
 ```
 
-### 2. Frontend Setup
+#### 2. Frontend
 
 ```bash
 cd frontend
@@ -80,9 +104,11 @@ npm install
 npm run dev
 ```
 
-### 3. Open the Dashboard
+#### 3. Open the Dashboard
 
 Navigate to **http://localhost:5173** in your browser.
+
+> API docs (Swagger UI) available at **http://localhost:8000/docs**
 
 ---
 
@@ -128,6 +154,24 @@ MAX_CONCURRENT_POSITIONS=5        # Max open trades at once
 | MACD Momentum | Momentum | Trending | 2.5% | 5.0% |
 | Bollinger Bands | Volatility | Both | 1.5% | 3.0% |
 | EMA Scalping | Scalping | Both | ATR×1.5 | ATR×2.5 |
+| Statistical Arbitrage | Pairs / Market-Neutral | Both | 3.0% | 2.5% |
+
+### Signal Ensemble
+No single strategy trades alone. The `SignalEnsemble` requires at minimum 2 strategies to agree before a trade is placed. It applies:
+- **Majority voting** with configurable quorum
+- **Weighted confidence** based on each strategy's recent Sharpe ratio
+- **Regime alignment boost** — signals matching the current market regime receive up to +30% confidence
+- **Conflict cancellation** — conflicting buy/sell signals with balanced weight cancel each other
+
+### Market Regime Detection
+The `MarketRegimeDetector` classifies conditions using ADX and ATR volatility percentile:
+
+| Regime | Condition | Preferred Strategies |
+|---|---|---|
+| Trending Up/Down | ADX ≥ 25 | MACD, EMA Scalping |
+| Ranging | ADX < 25, normal vol | RSI, Bollinger Bands |
+| High Volatility | ATR percentile ≥ 80 | Bollinger Bands only (reduced size) |
+| Low Volatility | ATR percentile ≤ 20 | EMA Scalping, RSI |
 
 ---
 
@@ -135,12 +179,17 @@ MAX_CONCURRENT_POSITIONS=5        # Max open trades at once
 
 The bot enforces multiple layers of protection:
 1. **Signal Strength Filter** — Only trades signals above minimum confidence threshold
-2. **Risk-Based Position Sizing** — Position size calculated so max loss = X% of portfolio
-3. **Max Concurrent Positions** — Never opens more than N trades simultaneously
-4. **Duplicate Symbol Prevention** — Never opens two positions on the same asset
-5. **Max Drawdown Circuit Breaker** — Stops all trading if portfolio drops by X%
-6. **Stop Loss** — Every trade has an automatic stop loss
-7. **Take Profit** — Every trade has an automatic profit target
+2. **Sentiment Macro Filter** — Blocks trade directions conflicting with Fear & Greed Index
+3. **Funding Rate Filter** — Blocks trades opposing extreme perpetual funding rates
+4. **Risk-Based Position Sizing** — Position size calculated so max loss = X% of portfolio
+5. **Kelly Criterion Sizing** — Half-Kelly fraction per strategy based on recent win rate and avg win/loss
+6. **Max Concurrent Positions** — Never opens more than N trades simultaneously
+7. **Duplicate Symbol Prevention** — Never opens two positions on the same asset
+8. **Max Drawdown Circuit Breaker** — Stops all trading if portfolio drops by X%
+9. **VaR Budget Enforcement** — Tracks daily Value at Risk; reduces activity when budget is consumed
+10. **Stop Loss** — Every trade has an automatic stop loss
+11. **Take Profit** — Every trade has an automatic profit target
+12. **TWAP Execution** — Large orders split into 5 slices over ~1 minute to minimize market impact
 
 ---
 
