@@ -8,7 +8,7 @@ import ccxt.async_support as ccxt
 import pandas as pd
 from sqlalchemy import update, select
 
-from models.database import TradeRecord, AsyncSessionLocal
+from models.database import TradeRecord, AsyncSessionLocal, BotSettings
 from engine.risk_manager import RiskManager
 from engine.regime_detector import MarketRegimeDetector, MarketRegime
 from engine.signal_ensemble import SignalEnsemble, EnsembleSignal
@@ -454,8 +454,11 @@ class TradingEngine:
                     twap_order = await self.twap_executor.execute_order(
                         twap_order, self._fetch_current_price, exchange=self.exchange
                     )
-                    actual_price = twap_order.avg_fill_price or es.weighted_entry_price
-                    fill_quantity = twap_order.total_filled or sizing.quantity
+                    actual_price = twap_order.avg_fill_price if twap_order.avg_fill_price is not None else es.weighted_entry_price
+                    fill_quantity = twap_order.total_filled if twap_order.total_filled is not None else sizing.quantity
+                    if fill_quantity == 0:
+                        logger.error("TWAP entry zero-filled for %s — aborting position open", es.symbol)
+                        return
                 else:
                     order = await self.exchange.create_market_order(
                         es.symbol, order_side, sizing.quantity
@@ -463,7 +466,11 @@ class TradingEngine:
                     actual_price = float(order.get("average") or order.get("price") or es.weighted_entry_price)
                     # Bug #2: on Binance Spot BUY, fee is taken from the received asset.
                     # CCXT 'filled' = gross matched volume; net delivery = filled * (1 - fee_rate)
-                    _filled = float(order.get("filled") or sizing.quantity)
+                    _raw = order.get("filled")
+                    _filled = float(_raw) if _raw is not None else sizing.quantity
+                    if _filled == 0:
+                        logger.error("Market entry zero-filled for %s — aborting position open", es.symbol)
+                        return
                     fill_quantity = _filled * (1 - TRADE_FEE_RATE) if es.direction == "BUY" else _filled
                 logger.info("Live order filled: %s %s qty=%.6f @ %.4f", es.direction, es.symbol, fill_quantity, actual_price)
                 es = EnsembleSignal(
@@ -626,8 +633,11 @@ class TradingEngine:
                     twap_order = await self.twap_executor.execute_order(
                         twap_order, self._fetch_current_price, exchange=self.exchange
                     )
-                    exit_price = twap_order.avg_fill_price or exit_price
-                    closed_qty = twap_order.total_filled or position.quantity
+                    exit_price = twap_order.avg_fill_price if twap_order.avg_fill_price is not None else exit_price
+                    closed_qty = twap_order.total_filled if twap_order.total_filled is not None else position.quantity
+                    if closed_qty == 0:
+                        logger.error("TWAP exit zero-filled for %s — position left active", symbol)
+                        return
                 else:
                     order = await self.exchange.create_market_order(
                         symbol, close_side, position.quantity
@@ -865,14 +875,18 @@ class TradingEngine:
                         await self._execute_ensemble_signal(primary)
                         # Bug #4: hedge legs copy primary USD value for exact delta-neutrality
                         primary_pos = self.active_positions.get(primary.symbol)
-                        for hedge in hedges:
-                            forced_qty = None
-                            if primary_pos is not None and hedge.weighted_entry_price > 0:
-                                forced_qty = round(
-                                    primary_pos.quantity * primary_pos.entry_price
-                                    / hedge.weighted_entry_price, 8
-                                )
-                            await self._execute_ensemble_signal(hedge, forced_quantity=forced_qty)
+                        # Bug #3: if primary was rejected, block ALL hedges — naked hedges break arbitrage
+                        if primary_pos is None:
+                            logger.info("Pairs: primary leg %s not opened — all hedge legs skipped", primary.symbol)
+                        else:
+                            for hedge in hedges:
+                                forced_qty = None
+                                if hedge.weighted_entry_price > 0:
+                                    forced_qty = round(
+                                        primary_pos.quantity * primary_pos.entry_price
+                                        / hedge.weighted_entry_price, 8
+                                    )
+                                await self._execute_ensemble_signal(hedge, forced_quantity=forced_qty)
                     else:
                         logger.info("Pairs trade skipped: need %d free slots, only %d available",
                                     len(pairs_legs), available)
