@@ -13,6 +13,16 @@ async def _get_public_futures_exchange() -> ccxt.Exchange:
         _FUTURES_EXCHANGE = ccxt.binance({"options": {"defaultType": "swap"}, "enableRateLimit": True})
     return _FUTURES_EXCHANGE
 
+async def close_public_futures_exchange():
+    """Close the shared futures exchange connection to avoid resource leaks on shutdown."""
+    global _FUTURES_EXCHANGE
+    if _FUTURES_EXCHANGE is not None:
+        try:
+            await _FUTURES_EXCHANGE.close()
+        except Exception:
+            pass
+        _FUTURES_EXCHANGE = None
+
 logger = logging.getLogger(__name__)
 
 PERPETUAL_SYMBOL_MAP = {

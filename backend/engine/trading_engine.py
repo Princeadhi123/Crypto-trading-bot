@@ -15,7 +15,7 @@ from engine.signal_ensemble import SignalEnsemble, EnsembleSignal
 from engine.strategy_performance_tracker import StrategyPerformanceTracker
 from engine.var_calculator import VaRCalculator
 from engine.sentiment_filter import SentimentFilter
-from engine.funding_rate_signal import FundingRateSignal
+from engine.funding_rate_signal import FundingRateSignal, close_public_futures_exchange
 from engine.twap_executor import TwapExecutor
 from engine.strategies.rsi_strategy import RsiStrategy
 from engine.strategies.macd_strategy import MacdStrategy
@@ -508,7 +508,12 @@ class TradingEngine:
         if position is None:
             return
 
-        pnl = position.unrealized_pnl
+        # Compute PnL from the actual exit_price, not from position.current_price
+        # which may be stale if the exit was triggered by a stop/TP check
+        if position.side == "BUY":
+            pnl = (exit_price - position.entry_price) * position.quantity
+        else:
+            pnl = (position.entry_price - exit_price) * position.quantity
         cost_basis = position.entry_price * position.quantity
         pnl_percent = (pnl / cost_basis * 100) if cost_basis > 0 else 0.0
 
@@ -786,6 +791,7 @@ class TradingEngine:
             self.active_positions.clear()
         if self.exchange:
             await self.exchange.close()
+        await close_public_futures_exchange()
         logger.info("Trading engine stopped")
 
     def apply_settings(self, settings: dict) -> dict:

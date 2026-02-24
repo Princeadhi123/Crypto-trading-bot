@@ -94,6 +94,7 @@ class SignalEnsemble:
             "MACD Momentum": "macd",
             "Bollinger Bands": "bollinger",
             "EMA Scalping": "scalping",
+            "Statistical Arbitrage": "pairs",
         }
         agreeing = []
 

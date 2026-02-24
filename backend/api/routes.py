@@ -204,8 +204,9 @@ async def get_recent_signals():
 
 @router.get("/strategies")
 async def get_strategies():
+    registry = trading_engine._strategy_registry
     strategy_info = []
-    for key, strategy in STRATEGY_REGISTRY.items():
+    for key, strategy in registry.items():
         strategy_info.append({
             "id": key,
             "name": strategy.name,
