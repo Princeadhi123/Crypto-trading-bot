@@ -73,6 +73,10 @@ async def update_settings(payload: BotSettingsSchema, session: AsyncSession = De
     settings.updated_at = datetime.utcnow()
     await session.commit()
 
+    # Update paper balance immediately in memory (even if bot is stopped) so dashboard reflects change
+    if settings.paper_trading_enabled:
+        trading_engine.paper_balance = payload.paper_balance
+
     # Hot-reload safe settings into the running engine (risk params, strategies, symbols)
     hot_reload_result = {}
     if trading_engine.is_running:
