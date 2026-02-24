@@ -93,6 +93,9 @@ async def application_lifespan(app: FastAPI):
     logger.info("Initializing database...")
     await init_database()
     trading_engine.set_broadcast_callback(broadcast_event)
+    
+    # Load paper balance from DB so dashboard shows correct value before bot starts
+    await trading_engine.load_initial_balance()
 
     exchange_name = os.getenv("EXCHANGE_NAME", "binance")
     api_key = os.getenv("API_KEY", "")

@@ -158,6 +158,18 @@ class TradingEngine:
         if self._broadcast_callback:
             await self._broadcast_callback(event_type, data)
 
+    async def load_initial_balance(self):
+        """Load paper balance from database on startup so dashboard shows correct value before bot starts."""
+        try:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(select(BotSettings).where(BotSettings.id == 1))
+                settings = result.scalar_one_or_none()
+                if settings and settings.paper_trading_enabled:
+                    self.paper_balance = settings.paper_balance
+                    logger.info("Loaded initial paper balance from DB: $%.2f", self.paper_balance)
+        except Exception as exc:
+            logger.warning("Failed to load initial balance from DB: %s — using default $10,000", exc)
+
     async def initialize_exchange(self, exchange_name: str, api_key: str = "", api_secret: str = ""):
         try:
             exchange_class = getattr(ccxt, exchange_name.lower(), None)
