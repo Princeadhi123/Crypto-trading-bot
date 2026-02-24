@@ -48,6 +48,7 @@ export default function SettingsPage() {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
+  const [hotReloadResult, setHotReloadResult] = useState(null)
   const [newSymbol, setNewSymbol] = useState('')
 
   useEffect(() => {
@@ -61,8 +62,13 @@ export default function SettingsPage() {
     if (!settings) return
     setSaving(true)
     try {
-      await botApi.updateSettings(settings)
+      const res = await botApi.updateSettings(settings)
       setSaved(true)
+      // Show hot-reload feedback if bot is running
+      if (res.data?.needs_restart?.length > 0 || res.data?.applied?.length > 0) {
+        setHotReloadResult(res.data)
+        setTimeout(() => setHotReloadResult(null), 8000)
+      }
       setTimeout(() => setSaved(false), 2500)
     } catch (e) {
       console.error(e)
@@ -347,6 +353,29 @@ export default function SettingsPage() {
           <div>• Restart the backend after updating .env</div>
         </div>
       </div>
+
+      {hotReloadResult && hotReloadResult.needs_restart?.length > 0 && (
+        <div className="rounded-xl border p-4 flex items-start gap-3" style={{ backgroundColor: 'rgba(245,158,11,0.06)', borderColor: 'rgba(245,158,11,0.25)' }}>
+          <AlertTriangle size={16} className="text-yellow-400 flex-shrink-0 mt-0.5" />
+          <div className="text-xs text-slate-300 leading-relaxed">
+            <strong className="text-yellow-400">Restart required.</strong> The following changes will take effect after you stop and restart the bot:{' '}
+            <span className="text-yellow-300 font-medium">{hotReloadResult.needs_restart.join(', ')}</span>.
+            {hotReloadResult.applied?.length > 0 && (
+              <span className="text-emerald-400"> Applied live: {hotReloadResult.applied.join(', ')}.</span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {hotReloadResult && hotReloadResult.applied?.length > 0 && !hotReloadResult.needs_restart?.length && (
+        <div className="rounded-xl border p-4 flex items-start gap-3" style={{ backgroundColor: 'rgba(16,185,129,0.06)', borderColor: 'rgba(16,185,129,0.25)' }}>
+          <Zap size={16} className="text-emerald-400 flex-shrink-0 mt-0.5" />
+          <div className="text-xs text-slate-300 leading-relaxed">
+            <strong className="text-emerald-400">Hot-reloaded!</strong> Updated live:{' '}
+            <span className="text-emerald-300 font-medium">{hotReloadResult.applied.join(', ')}</span>. No restart needed.
+          </div>
+        </div>
+      )}
 
       {!settings.paper_trading_enabled && (
         <div className="rounded-xl border p-4 flex items-start gap-3" style={{ backgroundColor: 'rgba(239,68,68,0.05)', borderColor: 'rgba(239,68,68,0.2)' }}>

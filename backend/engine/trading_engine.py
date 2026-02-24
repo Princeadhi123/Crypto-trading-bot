@@ -570,7 +570,6 @@ class TradingEngine:
                     profit_loss_percent=round(pnl_percent, 4),
                     status="closed",
                     closed_at=datetime.utcnow(),
-                    notes=reason,
                     exit_reason=reason,
                 )
             )
@@ -788,6 +787,49 @@ class TradingEngine:
         if self.exchange:
             await self.exchange.close()
         logger.info("Trading engine stopped")
+
+    def apply_settings(self, settings: dict) -> dict:
+        """Hot-reload settings that are safe to change while the bot is running.
+        Returns a dict indicating which settings were applied and which need a restart."""
+        applied = []
+        needs_restart = []
+
+        # --- Safe to hot-reload: risk parameters ---
+        new_risk_pct = settings.get("max_portfolio_risk_percent", self.risk_manager.max_portfolio_risk_percent)
+        new_dd_pct = settings.get("max_drawdown_percent", self.risk_manager.max_drawdown_percent)
+        new_max_pos = settings.get("max_concurrent_positions", self.risk_manager.max_concurrent_positions)
+        if (new_risk_pct != self.risk_manager.max_portfolio_risk_percent
+                or new_dd_pct != self.risk_manager.max_drawdown_percent
+                or new_max_pos != self.risk_manager.max_concurrent_positions):
+            self.risk_manager.max_portfolio_risk_percent = new_risk_pct
+            self.risk_manager.max_drawdown_percent = new_dd_pct
+            self.risk_manager.max_concurrent_positions = new_max_pos
+            applied.append("risk_parameters")
+
+        # --- Safe to hot-reload: active strategies ---
+        new_strategies = settings.get("active_strategies", self.active_strategy_names)
+        if set(new_strategies) != set(self.active_strategy_names):
+            self.active_strategy_names = list(new_strategies)
+            applied.append("active_strategies")
+
+        # --- Safe to hot-reload: active symbols (only add new ones; keep existing positions) ---
+        new_symbols = settings.get("active_symbols", self.active_symbols)
+        if set(new_symbols) != set(self.active_symbols):
+            self.active_symbols = list(new_symbols)
+            applied.append("active_symbols")
+
+        # --- NOT safe while running: mode changes ---
+        if settings.get("paper_trading_enabled", self.paper_trading) != self.paper_trading:
+            needs_restart.append("paper_trading_enabled")
+        if settings.get("hft_mode", self.hft_mode) != self.hft_mode:
+            needs_restart.append("hft_mode")
+        if settings.get("paper_balance", self.paper_balance) != self.paper_balance and self.paper_trading:
+            needs_restart.append("paper_balance")
+
+        if applied:
+            logger.info("Hot-reloaded settings: %s", ", ".join(applied))
+
+        return {"applied": applied, "needs_restart": needs_restart}
 
     def get_status(self) -> dict:
         return {

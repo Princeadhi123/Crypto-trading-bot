@@ -72,7 +72,17 @@ async def update_settings(payload: BotSettingsSchema, session: AsyncSession = De
     settings.hft_mode = payload.hft_mode
     settings.updated_at = datetime.utcnow()
     await session.commit()
-    return {"message": "Settings updated", "settings": _settings_row_to_dict(settings)}
+
+    # Hot-reload safe settings into the running engine (risk params, strategies, symbols)
+    hot_reload_result = {}
+    if trading_engine.is_running:
+        hot_reload_result = trading_engine.apply_settings(_settings_row_to_dict(settings))
+
+    return {
+        "message": "Settings updated",
+        "settings": _settings_row_to_dict(settings),
+        **hot_reload_result,
+    }
 
 
 @router.post("/bot/start")
