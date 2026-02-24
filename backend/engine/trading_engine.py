@@ -1024,17 +1024,8 @@ class TradingEngine:
         self.hft_mode = settings.get("hft_mode", False)
         # Clear OHLCV cache when mode changes, but preserve live market prices
         # so simulated OHLCV uses current prices as base instead of outdated fallbacks
+        # Note: market_prices is kept current by the background _live_price_refresh_loop in main.py
         self.ohlcv_cache.clear()
-        # Pre-fetch live prices before starting trading loop to prevent reverting to outdated fallback prices
-        if self.exchange:
-            for _sym in self.active_symbols:
-                try:
-                    _ticker = await self.exchange.fetch_ticker(_sym)
-                    if _ticker.get("last"):
-                        self.market_prices[_sym] = float(_ticker["last"])
-                        logger.info("Pre-fetched live price for %s: %.2f", _sym, self.market_prices[_sym])
-                except Exception as _exc:
-                    logger.warning("Could not pre-fetch price for %s: %s", _sym, _exc)
         self.risk_manager = RiskManager(
             max_portfolio_risk_percent=settings.get("max_portfolio_risk_percent", 2.0),
             max_drawdown_percent=settings.get("max_drawdown_percent", 10.0),
