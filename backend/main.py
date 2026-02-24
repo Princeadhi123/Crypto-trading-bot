@@ -139,6 +139,8 @@ async def websocket_endpoint(websocket: WebSocket):
             except json.JSONDecodeError:
                 pass
     except WebSocketDisconnect:
+        pass
+    finally:
         connection_manager.disconnect(websocket)
 
 

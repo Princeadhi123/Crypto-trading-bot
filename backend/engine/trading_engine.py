@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Optional
 import ccxt.async_support as ccxt
 import pandas as pd
-from sqlalchemy import update
+from sqlalchemy import update, select
 
 from models.database import TradeRecord, AsyncSessionLocal
 from engine.risk_manager import RiskManager
@@ -118,6 +118,9 @@ class TradingEngine:
         self.start_time = time.time()
         self.last_tick: Optional[datetime] = None
         self.ohlcv_cache: dict[str, pd.DataFrame] = {}
+        self._ohlcv_cache_time: dict[str, float] = {}
+        self._sim_last_candle_time: dict[str, float] = {}
+        self._cached_live_balance: float = 0.0
         self.recent_signals: list[dict] = []
         self.market_prices: dict[str, float] = {}
         self.current_regimes: dict[str, str] = {}
@@ -172,7 +175,7 @@ class TradingEngine:
             return False
 
     def get_var_report(self) -> dict:
-        if self.last_var_report:
+        if self.last_var_report and not self.active_positions:
             return self.last_var_report
         portfolio_value = self._compute_portfolio_value()
         report = self.var_calculator.compute(portfolio_value)
@@ -203,15 +206,22 @@ class TradingEngine:
         return self.funding_rate_signal.get_all_cached()
 
     async def _fetch_ohlcv(self, symbol: str) -> Optional[pd.DataFrame]:
+        cache_key = f"{symbol}_{self._active_timeframe}"
         try:
             if self.exchange is None:
                 return self._generate_simulated_ohlcv(symbol)
+            cached = self.ohlcv_cache.get(cache_key)
+            last_fetch = self._ohlcv_cache_time.get(cache_key, 0)
+            if cached is not None and (time.time() - last_fetch) < self._loop_interval:
+                return cached
             raw_data = await self.exchange.fetch_ohlcv(
                 symbol, timeframe=self._active_timeframe, limit=OHLCV_LIMIT)
             if not raw_data:
                 return None
             dataframe = pd.DataFrame(raw_data, columns=["timestamp", "open", "high", "low", "close", "volume"])
             dataframe["timestamp"] = pd.to_datetime(dataframe["timestamp"], unit="ms")
+            self.ohlcv_cache[cache_key] = dataframe
+            self._ohlcv_cache_time[cache_key] = time.time()
             return dataframe
         except Exception as exc:
             logger.warning("OHLCV fetch failed for %s: %s", symbol, exc)
@@ -232,11 +242,16 @@ class TradingEngine:
         cache_key = f"{symbol}_{self._active_timeframe}"
         cached = self.ohlcv_cache.get(cache_key)
 
+        candle_seconds = 60 if self.hft_mode else 300
         if cached is not None and len(cached) >= OHLCV_LIMIT:
+            now = time.time()
+            if now - self._sim_last_candle_time.get(cache_key, 0) < candle_seconds:
+                return cached
             last_close = cached["close"].iloc[-1]
             new_row = self._simulate_next_candle(last_close)
             updated = pd.concat([cached.iloc[1:], pd.DataFrame([new_row])], ignore_index=True)
             self.ohlcv_cache[cache_key] = updated
+            self._sim_last_candle_time[cache_key] = now
             return updated
 
         rng = np.random.default_rng(hash(symbol) % (2**31))
@@ -359,6 +374,11 @@ class TradingEngine:
 
         adjusted_confidence = min(es.final_confidence * sentiment_confidence_adj * funding_confidence_adj, 1.0)
 
+        # Live spot exchange: cannot open short positions — block SELL signals
+        if not self.paper_trading and self.exchange is not None and es.direction == "SELL":
+            if es.symbol not in self.active_positions:
+                logger.warning("Blocked SELL %s: spot exchange cannot open short positions", es.symbol)
+                return
         open_symbols = list(self.active_positions.keys())
         portfolio_value = self._compute_portfolio_value()
         self.risk_manager.update_peak_portfolio_value(portfolio_value)
@@ -373,6 +393,15 @@ class TradingEngine:
         if not sizing.allowed:
             logger.info("Rejected %s: %s", es.symbol, sizing.rejection_reason)
             return
+        # Apply exchange lot-size precision rules to avoid InvalidOrder in live mode
+        if not self.paper_trading and self.exchange is not None:
+            try:
+                sizing.quantity = float(self.exchange.amount_to_precision(es.symbol, sizing.quantity))
+                if sizing.quantity <= 0:
+                    logger.warning("Rejected %s: quantity rounds to zero after exchange precision", es.symbol)
+                    return
+            except Exception:
+                pass
         if self.paper_trading:
             if self.paper_balance < sizing.position_value:
                 return
@@ -479,6 +508,10 @@ class TradingEngine:
     async def _check_exit_conditions(self):
         symbols_to_close = []
         for symbol, position in self.active_positions.items():
+            if symbol not in self.active_symbols:
+                fetched = await self._fetch_current_price(symbol)
+                if fetched:
+                    self.market_prices[symbol] = fetched
             current_price = self.market_prices.get(symbol, position.current_price)
             position.current_price = current_price
             self._update_trailing_stop(position, current_price)
@@ -504,7 +537,7 @@ class TradingEngine:
             await self._close_position(symbol, exit_price, reason)
 
     async def _close_position(self, symbol: str, exit_price: float, reason: str):
-        position = self.active_positions.pop(symbol, None)
+        position = self.active_positions.get(symbol)
         if position is None:
             return
 
@@ -524,8 +557,9 @@ class TradingEngine:
             else:
                 # Short: return margin deposit (entry_price * qty) plus any PnL
                 self.paper_balance += (position.entry_price * position.quantity) + pnl
+            self.active_positions.pop(symbol)
         elif self.exchange is not None:
-            # Live trading: submit close order to exchange
+            # Live trading: only remove position AFTER exchange confirms fill
             try:
                 close_side = "sell" if position.side == "BUY" else "buy"
                 order = await self.exchange.create_market_order(
@@ -540,8 +574,12 @@ class TradingEngine:
                 pnl_percent = (pnl / cost_basis * 100) if cost_basis > 0 else 0.0
                 logger.info("Live close filled: %s %s qty=%.6f @ %.4f | PnL=%.2f",
                             close_side, symbol, position.quantity, exit_price, pnl)
+                self.active_positions.pop(symbol)
             except Exception as exc:
-                logger.error("Live close order failed for %s: %s", symbol, exc)
+                logger.error("Live close order failed for %s: %s — position remains active", symbol, exc)
+                return
+        else:
+            self.active_positions.pop(symbol)
 
         self.total_realized_pnl += pnl
 
@@ -600,8 +638,10 @@ class TradingEngine:
         btc_sym, eth_sym = "BTC/USDT", "ETH/USDT"
         if btc_sym not in self.active_symbols or eth_sym not in self.active_symbols:
             return None
-        btc_df = await self._fetch_ohlcv(btc_sym)
-        eth_df = await self._fetch_ohlcv(eth_sym)
+        btc_df = (self.ohlcv_cache.get(f"{btc_sym}_{self._active_timeframe}")
+                  or await self._fetch_ohlcv(btc_sym))
+        eth_df = (self.ohlcv_cache.get(f"{eth_sym}_{self._active_timeframe}")
+                  or await self._fetch_ohlcv(eth_sym))
         if btc_df is None or eth_df is None:
             return None
         self.market_prices[btc_sym] = float(btc_df["close"].iloc[-1])
@@ -639,7 +679,8 @@ class TradingEngine:
             else:
                 # Short: margin (entry_price*qty) locked, plus unrealized PnL
                 position_value += pos.entry_price * pos.quantity + pos.unrealized_pnl
-        return self.paper_balance + position_value
+        balance = self.paper_balance if self.paper_trading else self._cached_live_balance
+        return balance + position_value
 
     async def _price_stream_loop(self):
         """Lightweight fast loop: updates prices and checks exits every 2s in HFT mode.
@@ -668,12 +709,26 @@ class TradingEngine:
         except Exception:
             pass
 
+    async def _refresh_live_balance(self):
+        """Fetch real USDT free balance from exchange for accurate live portfolio valuation."""
+        try:
+            account = await self.exchange.fetch_balance()
+            usdt_free = float(account.get("USDT", {}).get("free", 0.0))
+            if usdt_free > 0:
+                self._cached_live_balance = usdt_free
+        except Exception as exc:
+            logger.warning("Failed to refresh live balance: %s", exc)
+
     async def _trading_loop(self):
         mode_label = "HFT 1m" if self.hft_mode else "Standard 5m"
         logger.info("Trading loop started [%s | %ds interval]", mode_label, self._loop_interval)
         while self.is_running:
             try:
                 self.last_tick = datetime.utcnow()
+
+                # Refresh live exchange balance for accurate portfolio value and risk sizing
+                if not self.paper_trading and self.exchange is not None:
+                    await self._refresh_live_balance()
 
                 # PARALLEL: process all symbols simultaneously — not sequentially
                 results = await asyncio.gather(
@@ -724,6 +779,22 @@ class TradingEngine:
         self.current_regimes.clear()
         self.paper_trading = settings.get("paper_trading_enabled", True)
         self.paper_balance = settings.get("paper_balance", 10000.0)
+        # Reload any open positions left from a previous session (crash/restart recovery)
+        try:
+            async with AsyncSessionLocal() as _s:
+                _r = await _s.execute(select(TradeRecord).where(TradeRecord.status == "open"))
+                for _t in _r.scalars().all():
+                    _pos = ActivePosition(
+                        trade_id=_t.id, symbol=_t.symbol, side=_t.side,
+                        strategy=_t.strategy, entry_price=_t.entry_price,
+                        quantity=_t.quantity, stop_loss=_t.stop_loss_price,
+                        take_profit=_t.take_profit_price,
+                    )
+                    self.active_positions[_t.symbol] = _pos
+            if self.active_positions:
+                logger.info("Reloaded %d open position(s) from previous session", len(self.active_positions))
+        except Exception as _exc:
+            logger.warning("Could not reload open positions on start: %s", _exc)
         self.active_symbols = settings.get("active_symbols", ["BTC/USDT", "ETH/USDT"])
         self.active_strategy_names = settings.get("active_strategies", ["rsi", "macd"])
         self.hft_mode = settings.get("hft_mode", False)
@@ -762,6 +833,18 @@ class TradingEngine:
                 pass
         # Close any open positions in the DB so they're never stuck as 'open' forever
         if self.active_positions:
+            # Live trading: send close orders to exchange before updating DB
+            if not self.paper_trading and self.exchange is not None:
+                for _pos in list(self.active_positions.values()):
+                    try:
+                        _side = "sell" if _pos.side == "BUY" else "buy"
+                        _order = await self.exchange.create_market_order(_pos.symbol, _side, _pos.quantity)
+                        _px = float(_order.get("average") or _order.get("price")
+                                    or self.market_prices.get(_pos.symbol, _pos.current_price))
+                        self.market_prices[_pos.symbol] = _px
+                        logger.info("Stop: live close filled: %s %s @ %.4f", _side, _pos.symbol, _px)
+                    except Exception as _exc:
+                        logger.error("Stop: failed to close live position %s: %s", _pos.symbol, _exc)
             try:
                 async with AsyncSessionLocal() as session:
                     for pos in self.active_positions.values():

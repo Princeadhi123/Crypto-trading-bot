@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, desc
+from sqlalchemy import select, func, desc, and_, Integer, case
 
 from models.database import get_db_session, TradeRecord, BotSettings
 from models.schemas import BotSettingsSchema, TradeRecordSchema
@@ -109,31 +109,53 @@ async def stop_bot(session: AsyncSession = Depends(get_db_session)):
 @router.get("/portfolio")
 async def get_portfolio(session: AsyncSession = Depends(get_db_session)):
     stats = trading_engine.get_portfolio_stats()
-
-    result = await session.execute(select(TradeRecord))
-    all_trades = result.scalars().all()
-
-    winning_trades = [t for t in all_trades if t.profit_loss and t.profit_loss > 0 and t.status == "closed"]
-    losing_trades = [t for t in all_trades if t.profit_loss and t.profit_loss <= 0 and t.status == "closed"]
-    closed_trades = [t for t in all_trades if t.status == "closed"]
-
-    total_wins = sum(t.profit_loss for t in winning_trades) if winning_trades else 0.0
-    total_losses = abs(sum(t.profit_loss for t in losing_trades)) if losing_trades else 0.0
-    profit_factor = (total_wins / total_losses) if total_losses > 0 else float("inf")
-
-    win_rate = (len(winning_trades) / len(closed_trades) * 100) if closed_trades else 0.0
+    is_paper = trading_engine.paper_trading
 
     today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     week_ago = today - timedelta(days=7)
-    daily_pnl = sum(t.profit_loss for t in closed_trades if t.closed_at and t.closed_at >= today and t.profit_loss)
-    weekly_pnl = sum(t.profit_loss for t in closed_trades if t.closed_at and t.closed_at >= week_ago and t.profit_loss)
 
+    # Aggregate counts and sums with DB-side SQL — avoids loading full table into RAM
+    base = and_(TradeRecord.is_paper_trade == is_paper, TradeRecord.status == "closed")
+
+    r_total = await session.execute(select(func.count(TradeRecord.id)).where(TradeRecord.is_paper_trade == is_paper))
+    total_trades = r_total.scalar_one()
+
+    r_wins = await session.execute(select(func.count(TradeRecord.id), func.sum(TradeRecord.profit_loss))
+                                   .where(and_(base, TradeRecord.profit_loss > 0)))
+    wins_row = r_wins.one()
+    winning_count = wins_row[0] or 0
+    total_wins = float(wins_row[1] or 0.0)
+
+    r_loss = await session.execute(select(func.count(TradeRecord.id), func.sum(TradeRecord.profit_loss))
+                                   .where(and_(base, TradeRecord.profit_loss <= 0)))
+    loss_row = r_loss.one()
+    losing_count = loss_row[0] or 0
+    total_losses = abs(float(loss_row[1] or 0.0))
+
+    r_closed = await session.execute(select(func.count(TradeRecord.id)).where(base))
+    closed_count = r_closed.scalar_one() or 0
+
+    profit_factor = (total_wins / total_losses) if total_losses > 0 else float("inf")
+    win_rate = (winning_count / closed_count * 100) if closed_count else 0.0
+
+    r_daily = await session.execute(select(func.coalesce(func.sum(TradeRecord.profit_loss), 0.0))
+                                    .where(and_(base, TradeRecord.closed_at >= today)))
+    daily_pnl = float(r_daily.scalar_one())
+
+    r_weekly = await session.execute(select(func.coalesce(func.sum(TradeRecord.profit_loss), 0.0))
+                                     .where(and_(base, TradeRecord.closed_at >= week_ago)))
+    weekly_pnl = float(r_weekly.scalar_one())
+
+    # Max drawdown — needs ordered PnL; limit to last 1000 closed trades to cap RAM usage
+    r_dd = await session.execute(
+        select(TradeRecord.profit_loss, TradeRecord.closed_at)
+        .where(base).order_by(TradeRecord.closed_at).limit(1000)
+    )
     max_drawdown = 0.0
     running_peak = 0.0
     running_pnl = 0.0
-    sorted_closed = sorted(closed_trades, key=lambda t: t.closed_at or datetime.min)
-    for trade in sorted_closed:
-        running_pnl += trade.profit_loss or 0
+    for pnl_val, _ in r_dd.all():
+        running_pnl += pnl_val or 0
         if running_pnl > running_peak:
             running_peak = running_pnl
         dd = running_peak - running_pnl
@@ -142,9 +164,9 @@ async def get_portfolio(session: AsyncSession = Depends(get_db_session)):
 
     return {
         **stats,
-        "total_trades": len(all_trades),
-        "winning_trades": len(winning_trades),
-        "losing_trades": len(losing_trades),
+        "total_trades": total_trades,
+        "winning_trades": winning_count,
+        "losing_trades": losing_count,
         "win_rate": round(win_rate, 2),
         "profit_factor": round(profit_factor, 2) if profit_factor != float("inf") else 9999.0,
         "max_drawdown": round(max_drawdown, 2),
@@ -232,9 +254,11 @@ async def toggle_strategy(strategy_id: str):
 @router.get("/analytics/pnl-chart")
 async def get_pnl_chart_data(days: int = Query(default=30, ge=1, le=365), session: AsyncSession = Depends(get_db_session)):
     since = datetime.utcnow() - timedelta(days=days)
+    is_paper = trading_engine.paper_trading
     result = await session.execute(
         select(TradeRecord)
         .where(TradeRecord.status == "closed")
+        .where(TradeRecord.is_paper_trade == is_paper)
         .where(TradeRecord.closed_at >= since)
         .order_by(TradeRecord.closed_at)
     )
@@ -339,31 +363,30 @@ async def get_regime_info():
 
 @router.get("/analytics/strategy-performance")
 async def get_strategy_performance(session: AsyncSession = Depends(get_db_session)):
-    result = await session.execute(
-        select(TradeRecord).where(TradeRecord.status == "closed")
+    is_paper = trading_engine.paper_trading
+    # Aggregate per-strategy stats with DB-side SQL — avoids loading full table into RAM
+    rows = await session.execute(
+        select(
+            TradeRecord.strategy,
+            func.count(TradeRecord.id).label("total"),
+            func.coalesce(func.sum(TradeRecord.profit_loss), 0.0).label("total_pnl"),
+            func.sum(
+                case((TradeRecord.profit_loss > 0, 1), else_=0)
+            ).label("wins"),
+        )
+        .where(and_(TradeRecord.status == "closed", TradeRecord.is_paper_trade == is_paper))
+        .group_by(TradeRecord.strategy)
     )
-    trades = result.scalars().all()
-    performance: dict[str, dict] = {}
-    for trade in trades:
-        if trade.strategy not in performance:
-            performance[trade.strategy] = {"total": 0, "wins": 0, "losses": 0, "total_pnl": 0.0}
-        performance[trade.strategy]["total"] += 1
-        pnl = trade.profit_loss or 0
-        performance[trade.strategy]["total_pnl"] += pnl
-        if pnl > 0:
-            performance[trade.strategy]["wins"] += 1
-        else:
-            performance[trade.strategy]["losses"] += 1
-
     result_list = []
-    for strategy_name, stats in performance.items():
-        total = stats["total"]
+    for row in rows.all():
+        total = row.total or 0
+        wins = row.wins or 0
         result_list.append({
-            "strategy": strategy_name,
+            "strategy": row.strategy,
             "total_trades": total,
-            "wins": stats["wins"],
-            "losses": stats["losses"],
-            "win_rate": round(stats["wins"] / total * 100, 1) if total > 0 else 0,
-            "total_pnl": round(stats["total_pnl"], 2),
+            "wins": wins,
+            "losses": total - wins,
+            "win_rate": round(wins / total * 100, 1) if total > 0 else 0,
+            "total_pnl": round(float(row.total_pnl), 2),
         })
     return result_list
