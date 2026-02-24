@@ -20,6 +20,7 @@ class TradeRecordSchema(BaseModel):
     opened_at: datetime
     closed_at: Optional[datetime] = None
     notes: Optional[str] = None
+    exit_reason: Optional[str] = None
 
     class Config:
         from_attributes = True

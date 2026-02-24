@@ -67,17 +67,25 @@ async def _live_price_refresh_loop():
     Runs independently of the trading bot — prices stay current even when bot is stopped."""
     public_exchange = ccxt.binance({"options": {"defaultType": "spot"}})
     logger.info("Live price refresh loop started")
-    while True:
-        try:
-            tickers = await public_exchange.fetch_tickers(PRICE_SYMBOLS)
-            fresh = {sym: float(tickers[sym]["last"]) for sym in PRICE_SYMBOLS if sym in tickers and tickers[sym]["last"]}
-            if fresh:
-                trading_engine.market_prices.update(fresh)
-                logger.debug("Prices refreshed: BTC=%.2f ETH=%.2f", fresh.get("BTC/USDT", 0), fresh.get("ETH/USDT", 0))
-        except Exception as exc:
-            logger.warning("Live price refresh failed: %s", exc)
-        finally:
+    try:
+        while True:
+            try:
+                tickers = await public_exchange.fetch_tickers(PRICE_SYMBOLS)
+                fresh = {sym: float(tickers[sym]["last"]) for sym in PRICE_SYMBOLS if sym in tickers and tickers[sym]["last"]}
+                if fresh:
+                    trading_engine.market_prices.update(fresh)
+                    logger.debug("Prices refreshed: BTC=%.2f ETH=%.2f", fresh.get("BTC/USDT", 0), fresh.get("ETH/USDT", 0))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Live price refresh failed: %s", exc)
             await asyncio.sleep(30)
+    finally:
+        try:
+            await public_exchange.close()
+        except Exception:
+            pass
+        logger.info("Live price refresh loop stopped")
 
 
 @asynccontextmanager

@@ -219,7 +219,7 @@ class TradingEngine:
 
     def _generate_simulated_ohlcv(self, symbol: str) -> pd.DataFrame:
         import numpy as np
-        base_prices = {
+        fallback_prices = {
             "BTC/USDT": 65000.0, "ETH/USDT": 3500.0, "BNB/USDT": 600.0,
             "SOL/USDT": 180.0, "ADA/USDT": 0.55, "DOT/USDT": 8.5,
             "MATIC/USDT": 0.85, "AVAX/USDT": 38.0,
@@ -227,7 +227,8 @@ class TradingEngine:
         # HFT mode: higher volatility on 1m bars to generate realistic signal frequency
         volatility = 0.003 if self.hft_mode else 0.008
         candle_freq = "1min" if self.hft_mode else "5min"
-        base = base_prices.get(symbol, 100.0)
+        # Prefer live price from background refresh; fall back to hardcoded defaults
+        base = self.market_prices.get(symbol, fallback_prices.get(symbol, 100.0))
         cache_key = f"{symbol}_{self._active_timeframe}"
         cached = self.ohlcv_cache.get(cache_key)
 
@@ -300,6 +301,8 @@ class TradingEngine:
         combined_weights = self.performance_tracker.get_combined_weights(regime_weights)
         raw_signals = []
         for strategy_name in self.active_strategy_names:
+            if strategy_name == "pairs":
+                continue  # Pairs needs two dataframes — handled by _run_pairs_signal
             strategy = self._strategy_registry.get(strategy_name)
             if strategy and strategy.enabled:
                 try:
@@ -583,9 +586,14 @@ class TradingEngine:
         )
 
     def _compute_portfolio_value(self) -> float:
-        position_value = sum(
-            pos.current_price * pos.quantity for pos in self.active_positions.values()
-        )
+        position_value = 0.0
+        for pos in self.active_positions.values():
+            if pos.side == "BUY":
+                # Long: asset is worth current market price
+                position_value += pos.current_price * pos.quantity
+            else:
+                # Short: margin (entry_price*qty) locked, plus unrealized PnL
+                position_value += pos.entry_price * pos.quantity + pos.unrealized_pnl
         return self.paper_balance + position_value
 
     async def _price_stream_loop(self):

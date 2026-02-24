@@ -7,7 +7,7 @@ from sqlalchemy import select, func, desc
 
 from models.database import get_db_session, TradeRecord, BotSettings
 from models.schemas import BotSettingsSchema, TradeRecordSchema
-from engine.trading_engine import trading_engine, STRATEGY_REGISTRY
+from engine.trading_engine import trading_engine, STRATEGY_REGISTRY, HFT_STRATEGY_REGISTRY
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -200,8 +200,13 @@ async def toggle_strategy(strategy_id: str):
     strategy = STRATEGY_REGISTRY.get(strategy_id)
     if strategy is None:
         raise HTTPException(status_code=404, detail=f"Strategy '{strategy_id}' not found")
-    strategy.enabled = not strategy.enabled
-    return {"strategy_id": strategy_id, "enabled": strategy.enabled}
+    new_state = not strategy.enabled
+    strategy.enabled = new_state
+    # Sync to HFT registry so toggling works in both Standard and HFT mode
+    hft_strategy = HFT_STRATEGY_REGISTRY.get(strategy_id)
+    if hft_strategy:
+        hft_strategy.enabled = new_state
+    return {"strategy_id": strategy_id, "enabled": new_state}
 
 
 @router.get("/analytics/pnl-chart")
