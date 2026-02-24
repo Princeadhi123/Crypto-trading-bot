@@ -168,8 +168,17 @@ async def get_trade_history(
 
 
 @router.get("/trades/count")
-async def get_trade_count(session: AsyncSession = Depends(get_db_session)):
-    result = await session.execute(select(func.count(TradeRecord.id)))
+async def get_trade_count(
+    symbol: Optional[str] = Query(default=None),
+    status: Optional[str] = Query(default=None),
+    session: AsyncSession = Depends(get_db_session),
+):
+    query = select(func.count(TradeRecord.id))
+    if symbol:
+        query = query.where(TradeRecord.symbol == symbol)
+    if status:
+        query = query.where(TradeRecord.status == status)
+    result = await session.execute(query)
     return {"count": result.scalar_one()}
 
 

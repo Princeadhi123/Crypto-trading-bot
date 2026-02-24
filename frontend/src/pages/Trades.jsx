@@ -55,9 +55,12 @@ export default function Trades() {
       if (filterStatus) params.status = filterStatus
       if (filterSymbol) params.symbol = filterSymbol.toUpperCase()
 
+      const countParams = {}
+      if (filterStatus) countParams.status = filterStatus
+      if (filterSymbol) countParams.symbol = filterSymbol.toUpperCase()
       const [tradesRes, countRes] = await Promise.all([
         botApi.getTrades(params),
-        botApi.getTradeCount(),
+        botApi.getTradeCount(countParams),
       ])
       setTrades(tradesRes.data)
       setTotalCount(countRes.data.count)

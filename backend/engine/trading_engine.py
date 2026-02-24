@@ -341,7 +341,7 @@ class TradingEngine:
             if not self.sentiment_filter.is_signal_allowed(es.direction, sentiment):
                 logger.info("Sentiment filter blocked %s %s: %s", es.direction, es.symbol, sentiment.reason)
                 return
-            sentiment_confidence_adj = self.sentiment_filter.get_confidence_adjustment(sentiment)
+            sentiment_confidence_adj = self.sentiment_filter.get_confidence_adjustment(sentiment, es.direction)
         except Exception:
             sentiment_confidence_adj = 1.0
 
@@ -377,6 +377,30 @@ class TradingEngine:
             if self.paper_balance < sizing.position_value:
                 return
             self.paper_balance -= sizing.position_value
+        elif self.exchange is not None:
+            # Live trading: submit actual market order to exchange
+            try:
+                order = await self.exchange.create_market_order(
+                    es.symbol,
+                    "buy" if es.direction == "BUY" else "sell",
+                    sizing.quantity,
+                )
+                actual_price = float(order.get("average") or order.get("price") or es.weighted_entry_price)
+                logger.info("Live order filled: %s %s qty=%.6f @ %.4f", es.direction, es.symbol, sizing.quantity, actual_price)
+                es = EnsembleSignal(
+                    symbol=es.symbol, direction=es.direction,
+                    composite_confidence=es.composite_confidence,
+                    agreeing_strategies=es.agreeing_strategies,
+                    disagreeing_strategies=es.disagreeing_strategies,
+                    weighted_entry_price=actual_price,
+                    suggested_stop_loss=es.suggested_stop_loss,
+                    suggested_take_profit=es.suggested_take_profit,
+                    regime=es.regime, regime_boost=es.regime_boost,
+                    raw_signals=es.raw_signals,
+                )
+            except Exception as exc:
+                logger.error("Live order submission failed for %s: %s", es.symbol, exc)
+                return
         label = " + ".join(es.agreeing_strategies)
 
         # Collect all ML training features at entry time.
@@ -494,8 +518,19 @@ class TradingEngine:
                 self.paper_balance += exit_price * position.quantity
             else:
                 # Short: return margin deposit (entry_price * qty) plus any PnL
-                # PnL = (entry_price - exit_price) * qty, so net = (2*entry - exit) * qty
                 self.paper_balance += (position.entry_price * position.quantity) + pnl
+        elif self.exchange is not None:
+            # Live trading: submit close order to exchange
+            try:
+                close_side = "sell" if position.side == "BUY" else "buy"
+                order = await self.exchange.create_market_order(
+                    symbol, close_side, position.quantity
+                )
+                exit_price = float(order.get("average") or order.get("price") or exit_price)
+                logger.info("Live close filled: %s %s qty=%.6f @ %.4f | PnL=%.2f",
+                            close_side, symbol, position.quantity, exit_price, pnl)
+            except Exception as exc:
+                logger.error("Live close order failed for %s: %s", symbol, exc)
 
         self.total_realized_pnl += pnl
 

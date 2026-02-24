@@ -94,7 +94,6 @@ class SentimentFilter:
                 return reading
         except Exception as exc:
             logger.warning("Fear & Greed API unavailable: %s — using neutral fallback", exc)
-            classification, bias = self._classify(self._fallback_value)
             fallback = SentimentReading(
                 value=self._fallback_value,
                 classification="Neutral (API unavailable)",
@@ -103,6 +102,9 @@ class SentimentFilter:
                 trading_bias="BOTH",
                 reason="Sentiment API unavailable — all signals permitted",
             )
+            # Cache the fallback for 5 minutes so we don't hammer the API on every tick
+            self._cached_reading = fallback
+            self._last_fetch = now
             return fallback
 
     def is_signal_allowed(self, signal_direction: str, sentiment: SentimentReading) -> bool:
@@ -122,19 +124,23 @@ class SentimentFilter:
             return signal_direction == "SELL"
         return True
 
-    def get_confidence_adjustment(self, sentiment: SentimentReading) -> float:
+    def get_confidence_adjustment(self, sentiment: SentimentReading, signal_direction: str = "BUY") -> float:
         """
         Returns a multiplier for signal confidence based on sentiment alignment.
-        A BUY signal during Extreme Fear gets a boost (contrarian confirmation).
-        A BUY signal during Greed gets a penalty (fighting the tide).
+        Direction-aware: contrarian signals get a boost, trend-following signals get a penalty.
+        - BUY in Extreme Fear = contrarian boost (fearful market = buying opportunity)
+        - SELL in Extreme Greed = contrarian boost (greedy market = selling opportunity)
+        - BUY in Extreme Greed = strong penalty (chasing tops)
+        - SELL in Extreme Fear = strong penalty (panic selling with crowd)
         """
         value = sentiment.value
-        if value <= 24:
-            return 1.25   # Extreme fear = strong contrarian boost for BUY
-        if value <= 44:
-            return 1.10   # Mild fear = slight boost
-        if value <= 55:
-            return 1.00   # Neutral = no adjustment
-        if value <= 74:
-            return 0.80   # Greed = reduce confidence (risky to buy tops)
-        return 0.60       # Extreme greed = significantly reduced confidence
+        is_buy = signal_direction == "BUY"
+        if value <= 24:    # Extreme Fear
+            return 1.25 if is_buy else 0.60
+        if value <= 44:    # Fear
+            return 1.10 if is_buy else 0.80
+        if value <= 55:    # Neutral
+            return 1.00
+        if value <= 74:    # Greed
+            return 0.80 if is_buy else 1.10
+        return 0.60 if is_buy else 1.25  # Extreme Greed: BUY penalised, SELL boosted

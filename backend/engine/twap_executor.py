@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Callable
 
 logger = logging.getLogger(__name__)
@@ -80,12 +80,15 @@ class TwapExecutor:
         slice_qty = total_quantity / n_slices
 
         now = datetime.utcnow()
-        slice_list = []
-        for i in range(n_slices):
-            from datetime import timedelta
-            target = datetime(now.year, now.month, now.day, now.hour, now.minute, now.second) + \
-                     timedelta(seconds=i * interval)
-            slice_list.append(TwapSlice(slice_number=i + 1, quantity=slice_qty, target_time=target))
+        base_time = datetime(now.year, now.month, now.day, now.hour, now.minute, now.second)
+        slice_list = [
+            TwapSlice(
+                slice_number=i + 1,
+                quantity=slice_qty,
+                target_time=base_time + timedelta(seconds=i * interval),
+            )
+            for i in range(n_slices)
+        ]
 
         order = TwapOrder(
             symbol=symbol,
@@ -154,6 +157,13 @@ class TwapExecutor:
         order.is_complete = True
         logger.info("TWAP complete: %s %s avg_fill=%.4f total_filled=%.6f",
                     order.side, order.symbol, order.avg_fill_price, order.total_filled)
+        # Purge old completed orders to prevent unbounded memory growth
+        stale_keys = [
+            k for k, o in self._active_orders.items()
+            if o.is_complete and (datetime.utcnow() - o.started_at).total_seconds() > 3600
+        ]
+        for k in stale_keys:
+            del self._active_orders[k]
         return order
 
     def get_active_orders(self) -> list[dict]:

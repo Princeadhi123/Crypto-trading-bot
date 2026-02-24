@@ -4,6 +4,15 @@ from datetime import datetime
 from typing import Optional
 import ccxt.async_support as ccxt
 
+_FUTURES_EXCHANGE: Optional[ccxt.Exchange] = None
+
+async def _get_public_futures_exchange() -> ccxt.Exchange:
+    """Returns a shared public Binance futures exchange (no auth needed for funding rates)."""
+    global _FUTURES_EXCHANGE
+    if _FUTURES_EXCHANGE is None:
+        _FUTURES_EXCHANGE = ccxt.binance({"options": {"defaultType": "swap"}, "enableRateLimit": True})
+    return _FUTURES_EXCHANGE
+
 logger = logging.getLogger(__name__)
 
 PERPETUAL_SYMBOL_MAP = {
@@ -73,9 +82,15 @@ class FundingRateSignal:
 
         raw_rate = SIMULATED_FUNDING_RATES.get(spot_symbol, 0.0001)
 
-        if self._exchange is not None and perp_symbol:
+        if perp_symbol:
             try:
-                funding_info = await self._exchange.fetch_funding_rate(perp_symbol)
+                # Funding rates require a futures/swap exchange context.
+                # Use provided exchange if it is futures-type, otherwise fall back
+                # to the shared public Binance swap exchange (no API key required).
+                exchange_to_use = self._exchange
+                if exchange_to_use is None or exchange_to_use.options.get("defaultType") == "spot":
+                    exchange_to_use = await _get_public_futures_exchange()
+                funding_info = await exchange_to_use.fetch_funding_rate(perp_symbol)
                 raw_rate = float(funding_info.get("fundingRate", raw_rate))
                 is_simulated = False
             except Exception as exc:

@@ -140,18 +140,25 @@ class MarketRegimeDetector:
         Returns a weight multiplier for each strategy based on current regime.
         Strategies not suited for the current regime get a very low weight.
         """
-        all_strategies = ["rsi", "macd", "bollinger", "scalping"]
+        all_strategies = ["rsi", "macd", "bollinger", "scalping", "pairs"]
         suitable = set(regime_analysis.suitable_strategies)
         weights = {}
         for strategy in all_strategies:
             if strategy in suitable:
                 weights[strategy] = 1.0
+            elif strategy == "pairs":
+                # Pairs trading is market-neutral; penalise in strong trends but never zero
+                if regime_analysis.regime in (MarketRegime.TRENDING_UP, MarketRegime.TRENDING_DOWN):
+                    weights[strategy] = 0.40
+                else:
+                    weights[strategy] = 0.80  # Ranging / low-vol: pairs works well
             else:
                 weights[strategy] = 0.25
 
         # Scale all weights down in high volatility (institutional risk-off)
         if regime_analysis.regime == MarketRegime.HIGH_VOLATILITY:
             for key in weights:
-                weights[key] *= 0.5
+                # Pairs gets a smaller volatility penalty — it profits from divergence
+                weights[key] *= 0.5 if key != "pairs" else 0.7
 
         return weights
