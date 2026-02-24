@@ -5,6 +5,8 @@ import os
 from contextlib import asynccontextmanager
 from typing import Set
 
+import ccxt.async_support as ccxt
+
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -57,6 +59,27 @@ async def broadcast_event(event_type: str, data: dict):
     await connection_manager.broadcast(event_type, data)
 
 
+PRICE_SYMBOLS = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "ADA/USDT", "DOT/USDT", "AVAX/USDT", "MATIC/USDT"]
+
+
+async def _live_price_refresh_loop():
+    """Background task: fetches real-time prices from Binance public API every 30s.
+    Runs independently of the trading bot — prices stay current even when bot is stopped."""
+    public_exchange = ccxt.binance({"options": {"defaultType": "spot"}})
+    logger.info("Live price refresh loop started")
+    while True:
+        try:
+            tickers = await public_exchange.fetch_tickers(PRICE_SYMBOLS)
+            fresh = {sym: float(tickers[sym]["last"]) for sym in PRICE_SYMBOLS if sym in tickers and tickers[sym]["last"]}
+            if fresh:
+                trading_engine.market_prices.update(fresh)
+                logger.debug("Prices refreshed: BTC=%.2f ETH=%.2f", fresh.get("BTC/USDT", 0), fresh.get("ETH/USDT", 0))
+        except Exception as exc:
+            logger.warning("Live price refresh failed: %s", exc)
+        finally:
+            await asyncio.sleep(30)
+
+
 @asynccontextmanager
 async def application_lifespan(app: FastAPI):
     logger.info("Initializing database...")
@@ -69,8 +92,10 @@ async def application_lifespan(app: FastAPI):
     if api_key and api_secret:
         await trading_engine.initialize_exchange(exchange_name, api_key, api_secret)
 
+    price_task = asyncio.create_task(_live_price_refresh_loop())
     logger.info("Trading Bot API started")
     yield
+    price_task.cancel()
     logger.info("Shutting down trading engine...")
     await trading_engine.stop()
 

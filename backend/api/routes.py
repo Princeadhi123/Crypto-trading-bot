@@ -175,13 +175,7 @@ async def get_trade_count(session: AsyncSession = Depends(get_db_session)):
 
 @router.get("/market/prices")
 async def get_market_prices():
-    prices = trading_engine.market_prices
-    if not prices:
-        prices = {
-            "BTC/USDT": 65432.0, "ETH/USDT": 3521.0, "BNB/USDT": 598.0,
-            "SOL/USDT": 182.5, "ADA/USDT": 0.548, "DOT/USDT": 8.45,
-        }
-    return prices
+    return trading_engine.market_prices
 
 
 @router.get("/signals/recent")
