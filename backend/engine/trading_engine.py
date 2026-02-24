@@ -246,7 +246,7 @@ class TradingEngine:
         import numpy as np
         fallback_prices = {
             "BTC/USDT": 65000.0, "ETH/USDT": 3500.0, "BNB/USDT": 600.0,
-            "SOL/USDT": 180.0, "ADA/USDT": 0.55, "DOT/USDT": 8.5,
+            "SOL/USDT": 180.0, "DOGE/USDT": 0.15, "XRP/USDT": 0.60,
             "MATIC/USDT": 0.85, "AVAX/USDT": 38.0,
         }
         # HFT mode: higher volatility on 1m bars to generate realistic signal frequency

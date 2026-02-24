@@ -59,7 +59,7 @@ async def broadcast_event(event_type: str, data: dict):
     await connection_manager.broadcast(event_type, data)
 
 
-PRICE_SYMBOLS = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "ADA/USDT", "DOT/USDT", "AVAX/USDT", "MATIC/USDT"]
+PRICE_SYMBOLS = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "DOGE/USDT", "XRP/USDT", "AVAX/USDT", "MATIC/USDT"]
 
 
 async def _live_price_refresh_loop():
