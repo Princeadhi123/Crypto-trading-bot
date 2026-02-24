@@ -50,7 +50,7 @@ class BollingerBandsStrategy(BaseStrategy):
 
         avg_volume = volumes.rolling(20).mean().iloc[-1]
         current_volume = volumes.iloc[-1]
-        volume_surge = current_volume > avg_volume * 1.2
+        volume_surge = bool(current_volume > avg_volume * 1.2)
 
         # Price bounces off lower band (was below, now above) = BUY signal
         lower_band_bounce = previous_price <= previous_lower and current_price > current_lower
