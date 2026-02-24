@@ -89,14 +89,24 @@ class TwapExecutor:
 
         now = datetime.utcnow()
         base_time = datetime(now.year, now.month, now.day, now.hour, now.minute, now.second)
-        slice_list = [
-            TwapSlice(
+        # Bug #1: last slice sweeps the remainder to avoid precision dust
+        # e.g. 10 / 3 slices = 3.333 * 3 = 9.999, leaving 0.001 unfilled
+        slice_list = []
+        for i in range(n_slices):
+            if i == n_slices - 1 and exchange is not None:
+                # Remainder = total - sum of all previous slices
+                remainder = total_quantity - slice_qty * (n_slices - 1)
+                try:
+                    qty = float(exchange.amount_to_precision(symbol, remainder))
+                except Exception:
+                    qty = remainder
+            else:
+                qty = slice_qty
+            slice_list.append(TwapSlice(
                 slice_number=i + 1,
-                quantity=slice_qty,
+                quantity=qty,
                 target_time=base_time + timedelta(seconds=i * interval),
-            )
-            for i in range(n_slices)
-        ]
+            ))
 
         order = TwapOrder(
             symbol=symbol,

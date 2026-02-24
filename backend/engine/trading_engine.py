@@ -443,8 +443,10 @@ class TradingEngine:
                         es.symbol, order_side, sizing.quantity
                     )
                     actual_price = float(order.get("average") or order.get("price") or es.weighted_entry_price)
-                    # Spot BUY: fee is deducted from received asset, so actual qty may be less
-                    fill_quantity = float(order.get("filled") or sizing.quantity)
+                    # Bug #2: on Binance Spot BUY, fee is taken from the received asset.
+                    # CCXT 'filled' = gross matched volume; net delivery = filled * (1 - fee_rate)
+                    _filled = float(order.get("filled") or sizing.quantity)
+                    fill_quantity = _filled * (1 - TRADE_FEE_RATE) if es.direction == "BUY" else _filled
                 logger.info("Live order filled: %s %s qty=%.6f @ %.4f", es.direction, es.symbol, fill_quantity, actual_price)
                 es = EnsembleSignal(
                     symbol=es.symbol, direction=es.direction,
@@ -664,6 +666,13 @@ class TradingEngine:
                     exit_reason=reason,
                 )
             )
+            # Bug #5: persist updated paper_balance so restarts don't wipe earned equity
+            if self.paper_trading:
+                await session.execute(
+                    update(BotSettings)
+                    .where(BotSettings.id == 1)
+                    .values(paper_balance=round(self.paper_balance, 8))
+                )
             await session.commit()
 
         logger.info("Closed %s %s at %.4f | PnL: %.2f (%.2f%%) | Reason: %s | Trailing: %s",
@@ -818,9 +827,17 @@ class TradingEngine:
                     if result and not isinstance(result, Exception):
                         await self._execute_ensemble_signal(result)
 
-                # Run Statistical Arbitrage separately — executes both BTC leg and ETH hedge leg
-                for pairs_leg in await self._run_pairs_signal():
-                    await self._execute_ensemble_signal(pairs_leg)
+                # Run Statistical Arbitrage separately — both legs must execute or neither does
+                # Bug #4: check slot capacity for ALL legs before executing any
+                pairs_legs = await self._run_pairs_signal()
+                if pairs_legs:
+                    available = self.risk_manager.max_concurrent_positions - len(self.active_positions)
+                    if available >= len(pairs_legs):
+                        for pairs_leg in pairs_legs:
+                            await self._execute_ensemble_signal(pairs_leg)
+                    else:
+                        logger.info("Pairs trade skipped: need %d free slots, only %d available",
+                                    len(pairs_legs), available)
 
                 # In standard mode, also check exits in this loop (HFT has dedicated loop)
                 if not self.hft_mode:
@@ -917,9 +934,20 @@ class TradingEngine:
                 for _pos in list(self.active_positions.values()):
                     try:
                         _side = "sell" if _pos.side == "BUY" else "buy"
-                        _order = await self.exchange.create_market_order(_pos.symbol, _side, _pos.quantity)
-                        _px = float(_order.get("average") or _order.get("price")
-                                    or self.market_prices.get(_pos.symbol, _pos.current_price))
+                        _close_val = _pos.quantity * self.market_prices.get(_pos.symbol, _pos.entry_price)
+                        # Bug #3: route large shutdown closes through TWAP to avoid slippage dump
+                        if _close_val >= self._compute_portfolio_value() * TWAP_THRESHOLD_PCT:
+                            _twap = self.twap_executor.create_order(
+                                _pos.symbol, _side, _pos.quantity, exchange=self.exchange
+                            )
+                            _twap = await self.twap_executor.execute_order(
+                                _twap, self._fetch_current_price, exchange=self.exchange
+                            )
+                            _px = _twap.avg_fill_price or self.market_prices.get(_pos.symbol, _pos.current_price)
+                        else:
+                            _order = await self.exchange.create_market_order(_pos.symbol, _side, _pos.quantity)
+                            _px = float(_order.get("average") or _order.get("price")
+                                        or self.market_prices.get(_pos.symbol, _pos.current_price))
                         self.market_prices[_pos.symbol] = _px
                         exchange_closed.add(_pos.symbol)
                         logger.info("Stop: live close filled: %s %s @ %.4f", _side, _pos.symbol, _px)
