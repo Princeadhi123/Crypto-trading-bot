@@ -41,6 +41,13 @@ const strategyDescriptions = {
     timeframe: '5m',
     type: 'Scalping',
   },
+  pairs: {
+    icon: TrendingUp,
+    color: 'teal',
+    description: 'Statistical Arbitrage — Pairs trading on the BTC/ETH log-price spread using rolling z-score (OLS hedge ratio). Market-neutral: generates alpha in both bull and bear markets by trading relative price divergence.',
+    timeframe: '5m',
+    type: 'Pairs / Market-Neutral',
+  },
 }
 
 const colorStyles = {
@@ -48,6 +55,7 @@ const colorStyles = {
   emerald: { bg: 'rgba(34,197,94,0.1)', border: 'rgba(34,197,94,0.25)', text: '#4ade80' },
   purple: { bg: 'rgba(168,85,247,0.1)', border: 'rgba(168,85,247,0.25)', text: '#c084fc' },
   yellow: { bg: 'rgba(234,179,8,0.1)', border: 'rgba(234,179,8,0.25)', text: '#facc15' },
+  teal: { bg: 'rgba(20,184,166,0.1)', border: 'rgba(20,184,166,0.25)', text: '#2dd4bf' },
 }
 
 export default function Strategies() {

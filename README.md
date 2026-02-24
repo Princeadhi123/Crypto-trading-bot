@@ -205,5 +205,15 @@ The bot enforces multiple layers of protection:
 | GET | `/api/trades` | Trade history |
 | GET | `/api/market/prices` | Live prices |
 | GET | `/api/signals/recent` | Recent signals |
+| GET | `/api/strategies` | List strategies + enabled state |
+| PATCH | `/api/strategies/{id}/toggle` | Enable/disable a strategy |
 | GET/PUT | `/api/settings` | Bot settings |
+| GET | `/api/analytics/pnl-chart` | Cumulative P&L chart data |
+| GET | `/api/analytics/strategy-performance` | Per-strategy win rate & P&L |
+| GET | `/api/analytics/live-performance` | Rolling Sharpe, Kelly, dynamic weights |
+| GET | `/api/analytics/regime` | Current market regime per symbol |
+| GET | `/api/analytics/var` | VaR 95/99, CVaR, Sharpe, Sortino |
+| GET | `/api/analytics/sentiment` | Fear & Greed Index reading |
+| GET | `/api/analytics/funding-rates` | Perpetual funding rates per symbol |
+| GET | `/api/analytics/ml-training-data` | Export closed trades as ML dataset |
 | WS | `/ws` | Real-time events |

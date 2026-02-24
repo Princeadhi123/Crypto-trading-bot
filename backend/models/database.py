@@ -53,7 +53,7 @@ class BotSettings(Base):
     default_stop_loss_percent: Mapped[float] = mapped_column(Float, default=2.0)
     default_take_profit_percent: Mapped[float] = mapped_column(Float, default=4.0)
     max_concurrent_positions: Mapped[int] = mapped_column(Integer, default=5)
-    active_strategies: Mapped[str] = mapped_column(Text, default="rsi,macd,bollinger")
+    active_strategies: Mapped[str] = mapped_column(Text, default="rsi,macd,bollinger,scalping")
     active_symbols: Mapped[str] = mapped_column(Text, default="BTC/USDT,ETH/USDT,BNB/USDT,SOL/USDT")
     hft_mode: Mapped[bool] = mapped_column(Boolean, default=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

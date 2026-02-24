@@ -14,6 +14,7 @@ const AVAILABLE_STRATEGIES = [
   { id: 'macd', label: 'MACD Momentum' },
   { id: 'bollinger', label: 'Bollinger Bands' },
   { id: 'scalping', label: 'EMA Scalping' },
+  { id: 'pairs', label: 'Statistical Arbitrage' },
 ]
 
 function SliderField({ label, value, min, max, step = 0.1, unit = '%', onChange, description }) {

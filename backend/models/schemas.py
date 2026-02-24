@@ -34,7 +34,7 @@ class BotSettingsSchema(BaseModel):
     default_stop_loss_percent: float = Field(default=2.0, ge=0.5, le=20.0)
     default_take_profit_percent: float = Field(default=4.0, ge=1.0, le=50.0)
     max_concurrent_positions: int = Field(default=5, ge=1, le=20)
-    active_strategies: List[str] = ["rsi", "macd", "bollinger"]
+    active_strategies: List[str] = ["rsi", "macd", "bollinger", "scalping"]
     active_symbols: List[str] = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT"]
     hft_mode: bool = False
 
