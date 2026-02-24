@@ -67,10 +67,21 @@ class SignalEnsemble:
         buy_signals = [s for s in raw_signals if s.signal_type == "BUY"]
         sell_signals = [s for s in raw_signals if s.signal_type == "SELL"]
 
+        strategy_keys_from_name = {
+            "RSI Mean Reversion": "rsi",
+            "MACD Momentum": "macd",
+            "Bollinger Bands": "bollinger",
+            "EMA Scalping": "scalping",
+            "Statistical Arbitrage": "pairs",
+        }
+
+        def _resolve_key(strategy_name: str) -> str:
+            return strategy_keys_from_name.get(strategy_name, strategy_name.lower())
+
         # Conflict detection: if both buy and sell signals exist, cancel if too balanced
         if buy_signals and sell_signals:
-            buy_weight = sum(strategy_weights.get(s.strategy_name.lower().split()[0], 1.0) * s.strength for s in buy_signals)
-            sell_weight = sum(strategy_weights.get(s.strategy_name.lower().split()[0], 1.0) * s.strength for s in sell_signals)
+            buy_weight = sum(strategy_weights.get(_resolve_key(s.strategy_name), 1.0) * s.strength for s in buy_signals)
+            sell_weight = sum(strategy_weights.get(_resolve_key(s.strategy_name), 1.0) * s.strength for s in sell_signals)
             total_weight = buy_weight + sell_weight
             if total_weight > 0:
                 conflict_ratio = min(buy_weight, sell_weight) / total_weight
@@ -89,13 +100,6 @@ class SignalEnsemble:
         weighted_stop = 0.0
         weighted_tp = 0.0
         weighted_price = 0.0
-        strategy_keys_from_name = {
-            "RSI Mean Reversion": "rsi",
-            "MACD Momentum": "macd",
-            "Bollinger Bands": "bollinger",
-            "EMA Scalping": "scalping",
-            "Statistical Arbitrage": "pairs",
-        }
         agreeing = []
 
         for signal in dominant_signals:

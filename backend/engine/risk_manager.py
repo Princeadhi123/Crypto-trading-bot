@@ -204,6 +204,14 @@ class RiskManager:
                 rejection_reason="Calculated quantity is zero or negative",
             )
 
+        # 11. Minimum notional floor (Binance Spot requires ~$5 USDT minimum)
+        MIN_NOTIONAL_USDT = 5.0
+        if position_value < MIN_NOTIONAL_USDT:
+            return PositionSizeResult(
+                allowed=False, quantity=0.0, position_value=0.0, risk_amount=0.0,
+                rejection_reason=f"Position value ${position_value:.2f} below exchange minimum notional (${MIN_NOTIONAL_USDT})",
+            )
+
         actual_risk = quantity * price_risk_per_unit
         logger.info(
             "Sizing %s %s: qty=%.6f value=$%.2f risk=$%.2f (%.2f%%) | "

@@ -146,15 +146,16 @@ async def get_portfolio(session: AsyncSession = Depends(get_db_session)):
                                      .where(and_(base, TradeRecord.closed_at >= week_ago)))
     weekly_pnl = float(r_weekly.scalar_one())
 
-    # Max drawdown — needs ordered PnL; limit to last 1000 closed trades to cap RAM usage
+    # Max drawdown — fetch most recent 1000 trades (desc), reverse for chronological order
     r_dd = await session.execute(
         select(TradeRecord.profit_loss, TradeRecord.closed_at)
-        .where(base).order_by(TradeRecord.closed_at).limit(1000)
+        .where(base).order_by(desc(TradeRecord.closed_at)).limit(1000)
     )
+    dd_rows = list(reversed(r_dd.all()))
     max_drawdown = 0.0
     running_peak = 0.0
     running_pnl = 0.0
-    for pnl_val, _ in r_dd.all():
+    for pnl_val, _ in dd_rows:
         running_pnl += pnl_val or 0
         if running_pnl > running_peak:
             running_peak = running_pnl
@@ -364,29 +365,34 @@ async def get_regime_info():
 @router.get("/analytics/strategy-performance")
 async def get_strategy_performance(session: AsyncSession = Depends(get_db_session)):
     is_paper = trading_engine.paper_trading
-    # Aggregate per-strategy stats with DB-side SQL — avoids loading full table into RAM
+    # Fetch raw joined labels — split on " + " and credit each base strategy individually
     rows = await session.execute(
         select(
             TradeRecord.strategy,
-            func.count(TradeRecord.id).label("total"),
-            func.coalesce(func.sum(TradeRecord.profit_loss), 0.0).label("total_pnl"),
-            func.sum(
-                case((TradeRecord.profit_loss > 0, 1), else_=0)
-            ).label("wins"),
+            TradeRecord.profit_loss,
         )
         .where(and_(TradeRecord.status == "closed", TradeRecord.is_paper_trade == is_paper))
-        .group_by(TradeRecord.strategy)
     )
+    perf: dict[str, dict] = {}
+    for strategy_label, pnl in rows.all():
+        for base_strategy in (strategy_label or "unknown").split(" + "):
+            base_strategy = base_strategy.strip()
+            if base_strategy not in perf:
+                perf[base_strategy] = {"total": 0, "wins": 0, "total_pnl": 0.0}
+            perf[base_strategy]["total"] += 1
+            perf[base_strategy]["total_pnl"] += pnl or 0.0
+            if (pnl or 0.0) > 0:
+                perf[base_strategy]["wins"] += 1
     result_list = []
-    for row in rows.all():
-        total = row.total or 0
-        wins = row.wins or 0
+    for strategy_name, stats in perf.items():
+        total = stats["total"]
+        wins = stats["wins"]
         result_list.append({
-            "strategy": row.strategy,
+            "strategy": strategy_name,
             "total_trades": total,
             "wins": wins,
             "losses": total - wins,
             "win_rate": round(wins / total * 100, 1) if total > 0 else 0,
-            "total_pnl": round(float(row.total_pnl), 2),
+            "total_pnl": round(stats["total_pnl"], 2),
         })
     return result_list

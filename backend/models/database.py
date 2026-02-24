@@ -24,7 +24,7 @@ class TradeRecord(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     symbol: Mapped[str] = mapped_column(String(20))
     side: Mapped[str] = mapped_column(String(10))
-    strategy: Mapped[str] = mapped_column(String(50))
+    strategy: Mapped[str] = mapped_column(Text)
     entry_price: Mapped[float] = mapped_column(Float)
     exit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     quantity: Mapped[float] = mapped_column(Float)

@@ -109,10 +109,12 @@ class TwapExecutor:
         order: TwapOrder,
         get_current_price_fn: Callable,
         on_slice_filled_fn: Optional[Callable] = None,
+        exchange=None,
     ) -> TwapOrder:
         """
         Executes all slices of the TWAP order with proper timing.
-        In live mode, calls the exchange. In paper mode, simulates fills.
+        If exchange is provided, submits real market orders per slice (live mode).
+        Otherwise simulates fills with realistic slippage (paper mode).
         """
         import random
         slippage_factor = self.simulated_slippage_bps / 10000
@@ -130,10 +132,18 @@ class TwapExecutor:
                     logger.warning("TWAP: no price for %s, skipping slice %d", order.symbol, i + 1)
                     continue
 
-                # Simulate realistic slippage
-                direction_mult = 1.0 if order.side == "BUY" else -1.0
-                slippage = current_price * slippage_factor * direction_mult * random.uniform(0.5, 1.5)
-                fill_price = current_price + slippage
+                if exchange is not None:
+                    live_order = await exchange.create_market_order(
+                        order.symbol, order.side, slice_order.quantity
+                    )
+                    fill_price = float(
+                        live_order.get("average") or live_order.get("price") or current_price
+                    )
+                else:
+                    # Simulate realistic slippage
+                    direction_mult = 1.0 if order.side == "BUY" else -1.0
+                    slippage = current_price * slippage_factor * direction_mult * random.uniform(0.5, 1.5)
+                    fill_price = current_price + slippage
 
                 slice_order.executed = True
                 slice_order.fill_price = round(fill_price, 8)

@@ -25,6 +25,9 @@ from engine.strategies.pairs_strategy import StatisticalArbitrageStrategy
 
 logger = logging.getLogger(__name__)
 
+TRADE_FEE_RATE = 0.001
+TWAP_THRESHOLD_PCT = 0.02
+
 STRATEGY_REGISTRY = {
     "rsi": RsiStrategy(),
     "macd": MacdStrategy(),
@@ -374,11 +377,19 @@ class TradingEngine:
 
         adjusted_confidence = min(es.final_confidence * sentiment_confidence_adj * funding_confidence_adj, 1.0)
 
+        # Bug #1: Handle reversal — close opposing position before opening new one
+        existing_pos = self.active_positions.get(es.symbol)
+        if existing_pos is not None:
+            if existing_pos.side != es.direction:
+                logger.info("Reversal %s: closing existing %s before opening %s",
+                            es.symbol, existing_pos.side, es.direction)
+                await self._close_position(es.symbol, es.weighted_entry_price, "reversal")
+            else:
+                return
         # Live spot exchange: cannot open short positions — block SELL signals
         if not self.paper_trading and self.exchange is not None and es.direction == "SELL":
-            if es.symbol not in self.active_positions:
-                logger.warning("Blocked SELL %s: spot exchange cannot open short positions", es.symbol)
-                return
+            logger.warning("Blocked SELL %s: spot exchange cannot open short positions", es.symbol)
+            return
         open_symbols = list(self.active_positions.keys())
         portfolio_value = self._compute_portfolio_value()
         self.risk_manager.update_peak_portfolio_value(portfolio_value)
@@ -407,14 +418,23 @@ class TradingEngine:
                 return
             self.paper_balance -= sizing.position_value
         elif self.exchange is not None:
-            # Live trading: submit actual market order to exchange
+            # Live trading: route through TWAP for large orders, direct market order for small ones
             try:
-                order = await self.exchange.create_market_order(
-                    es.symbol,
-                    "buy" if es.direction == "BUY" else "sell",
-                    sizing.quantity,
-                )
-                actual_price = float(order.get("average") or order.get("price") or es.weighted_entry_price)
+                order_side = "buy" if es.direction == "BUY" else "sell"
+                portfolio_value_now = self._compute_portfolio_value()
+                if sizing.position_value >= portfolio_value_now * TWAP_THRESHOLD_PCT:
+                    twap_order = self.twap_executor.create_order(
+                        es.symbol, order_side, sizing.quantity
+                    )
+                    twap_order = await self.twap_executor.execute_order(
+                        twap_order, self._fetch_current_price, exchange=self.exchange
+                    )
+                    actual_price = twap_order.avg_fill_price or es.weighted_entry_price
+                else:
+                    order = await self.exchange.create_market_order(
+                        es.symbol, order_side, sizing.quantity
+                    )
+                    actual_price = float(order.get("average") or order.get("price") or es.weighted_entry_price)
                 logger.info("Live order filled: %s %s qty=%.6f @ %.4f", es.direction, es.symbol, sizing.quantity, actual_price)
                 es = EnsembleSignal(
                     symbol=es.symbol, direction=es.direction,
@@ -547,6 +567,9 @@ class TradingEngine:
             pnl = (exit_price - position.entry_price) * position.quantity
         else:
             pnl = (position.entry_price - exit_price) * position.quantity
+        # Deduct exchange fees: entry leg + exit leg (0.1% each in paper; real fees from order in live)
+        fee = (position.entry_price + exit_price) * position.quantity * TRADE_FEE_RATE
+        pnl -= fee
         cost_basis = position.entry_price * position.quantity
         pnl_percent = (pnl / cost_basis * 100) if cost_basis > 0 else 0.0
 
@@ -833,7 +856,8 @@ class TradingEngine:
                 pass
         # Close any open positions in the DB so they're never stuck as 'open' forever
         if self.active_positions:
-            # Live trading: send close orders to exchange before updating DB
+            # Bug #5: track which symbols exchange actually confirmed closed
+            exchange_closed: set[str] = set()
             if not self.paper_trading and self.exchange is not None:
                 for _pos in list(self.active_positions.values()):
                     try:
@@ -842,17 +866,23 @@ class TradingEngine:
                         _px = float(_order.get("average") or _order.get("price")
                                     or self.market_prices.get(_pos.symbol, _pos.current_price))
                         self.market_prices[_pos.symbol] = _px
+                        exchange_closed.add(_pos.symbol)
                         logger.info("Stop: live close filled: %s %s @ %.4f", _side, _pos.symbol, _px)
                     except Exception as _exc:
-                        logger.error("Stop: failed to close live position %s: %s", _pos.symbol, _exc)
+                        logger.error("Stop: failed to close live position %s: %s — left open in DB", _pos.symbol, _exc)
             try:
                 async with AsyncSessionLocal() as session:
                     for pos in self.active_positions.values():
+                        # Only mark closed in DB if paper trade OR exchange confirmed the close
+                        if not self.paper_trading and pos.symbol not in exchange_closed:
+                            continue
                         exit_px = self.market_prices.get(pos.symbol, pos.current_price)
                         if pos.side == "BUY":
                             pnl = (exit_px - pos.entry_price) * pos.quantity
                         else:
                             pnl = (pos.entry_price - exit_px) * pos.quantity
+                        fee = (pos.entry_price + exit_px) * pos.quantity * TRADE_FEE_RATE
+                        pnl -= fee
                         cost = pos.entry_price * pos.quantity
                         pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
                         await session.execute(
