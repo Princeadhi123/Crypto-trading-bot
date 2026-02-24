@@ -431,7 +431,8 @@ class TradingEngine:
                 portfolio_value_now = self._compute_portfolio_value()
                 if sizing.position_value >= portfolio_value_now * TWAP_THRESHOLD_PCT:
                     twap_order = self.twap_executor.create_order(
-                        es.symbol, order_side, sizing.quantity, exchange=self.exchange
+                        es.symbol, order_side, sizing.quantity,
+                        exchange=self.exchange, price=es.weighted_entry_price
                     )
                     twap_order = await self.twap_executor.execute_order(
                         twap_order, self._fetch_current_price, exchange=self.exchange
@@ -601,7 +602,8 @@ class TradingEngine:
                 # Bug #2: route large exits through TWAP to avoid slippage dump
                 if close_value >= self._compute_portfolio_value() * TWAP_THRESHOLD_PCT:
                     twap_order = self.twap_executor.create_order(
-                        symbol, close_side, position.quantity, exchange=self.exchange
+                        symbol, close_side, position.quantity,
+                        exchange=self.exchange, price=exit_price
                     )
                     twap_order = await self.twap_executor.execute_order(
                         twap_order, self._fetch_current_price, exchange=self.exchange
@@ -801,9 +803,10 @@ class TradingEngine:
         """Fetch real USDT free balance from exchange for accurate live portfolio valuation."""
         try:
             account = await self.exchange.fetch_balance()
-            usdt_free = float(account.get("USDT", {}).get("free", 0.0))
-            if usdt_free > 0:
-                self._cached_live_balance = usdt_free
+            usdt_free = account.get("USDT", {}).get("free")
+            # Bug #4: accept 0.0 (fully invested) — only skip None/missing values
+            if usdt_free is not None:
+                self._cached_live_balance = float(usdt_free)
         except Exception as exc:
             logger.warning("Failed to refresh live balance: %s", exc)
 
@@ -877,7 +880,14 @@ class TradingEngine:
         # Reload any open positions left from a previous session (crash/restart recovery)
         try:
             async with AsyncSessionLocal() as _s:
-                _r = await _s.execute(select(TradeRecord).where(TradeRecord.status == "open"))
+                # Bug #3: filter by is_paper_trade to prevent paper positions
+                # from loading into a live session and triggering real orders
+                _r = await _s.execute(
+                    select(TradeRecord).where(
+                        TradeRecord.status == "open",
+                        TradeRecord.is_paper_trade == self.paper_trading,
+                    )
+                )
                 for _t in _r.scalars().all():
                     _pos = ActivePosition(
                         trade_id=_t.id, symbol=_t.symbol, side=_t.side,
@@ -938,7 +948,9 @@ class TradingEngine:
                         # Bug #3: route large shutdown closes through TWAP to avoid slippage dump
                         if _close_val >= self._compute_portfolio_value() * TWAP_THRESHOLD_PCT:
                             _twap = self.twap_executor.create_order(
-                                _pos.symbol, _side, _pos.quantity, exchange=self.exchange
+                                _pos.symbol, _side, _pos.quantity,
+                                exchange=self.exchange,
+                                price=self.market_prices.get(_pos.symbol, _pos.entry_price)
                             )
                             _twap = await self.twap_executor.execute_order(
                                 _twap, self._fetch_current_price, exchange=self.exchange

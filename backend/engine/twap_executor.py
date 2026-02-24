@@ -6,6 +6,9 @@ from typing import Optional, Callable
 
 logger = logging.getLogger(__name__)
 
+TRADE_FEE_RATE = 0.001   # mirrors trading_engine constant; keep in sync
+_MIN_NOTIONAL = 5.0      # Binance minimum order value in quote currency
+
 
 @dataclass
 class TwapSlice:
@@ -75,8 +78,16 @@ class TwapExecutor:
         slices: Optional[int] = None,
         interval_seconds: Optional[float] = None,
         exchange=None,
+        price: Optional[float] = None,
     ) -> TwapOrder:
         n_slices = slices or self.default_slices
+        # Bug #2: reduce n_slices so every slice meets Binance MIN_NOTIONAL ($5.00)
+        if price is not None and price > 0:
+            max_slices_by_notional = max(1, int((total_quantity * price) / _MIN_NOTIONAL))
+            if n_slices > max_slices_by_notional:
+                logger.info("TWAP: reducing slices %d -> %d to satisfy MIN_NOTIONAL",
+                            n_slices, max_slices_by_notional)
+                n_slices = max_slices_by_notional
         interval = interval_seconds or self.default_interval_seconds
         raw_slice_qty = total_quantity / n_slices
         # Bug #1: apply exchange lot-size precision to every slice to prevent InvalidOrder
@@ -157,8 +168,14 @@ class TwapExecutor:
                     fill_price = float(
                         live_order.get("average") or live_order.get("price") or current_price
                     )
-                    # Use actual filled qty (may differ from requested due to spot fee deduction)
-                    slice_filled_qty = float(live_order.get("filled") or slice_order.quantity)
+                    # Bug #1: on Binance Spot BUY, fee is taken from the received asset.
+                    # CCXT 'filled' = gross matched volume; net delivery = filled * (1 - fee_rate)
+                    _raw_filled = float(live_order.get("filled") or slice_order.quantity)
+                    slice_filled_qty = (
+                        _raw_filled * (1 - TRADE_FEE_RATE)
+                        if order.side.upper() == "BUY"
+                        else _raw_filled
+                    )
                 else:
                     # Simulate realistic slippage
                     direction_mult = 1.0 if order.side.upper() == "BUY" else -1.0
