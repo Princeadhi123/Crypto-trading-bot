@@ -240,27 +240,27 @@ export default function Strategies() {
             <table className="data-table">
               <thead>
                 <tr>
-                  <th className="text-left py-2 pr-4">Strategy</th>
-                  <th className="text-right py-2 pr-4">Sharpe (rolling)</th>
-                  <th className="text-right py-2 pr-4">Kelly Fraction</th>
-                  <th className="text-right py-2 pr-4">Dynamic Weight</th>
-                  <th className="text-right py-2 pr-4">Win Rate</th>
-                  <th className="text-right py-2">Trades</th>
+                  <th className="text-left">Strategy</th>
+                  <th className="text-right">Sharpe (rolling)</th>
+                  <th className="text-right">Kelly Fraction</th>
+                  <th className="text-right">Dynamic Weight</th>
+                  <th className="text-right">Win Rate</th>
+                  <th className="text-right">Trades</th>
                 </tr>
               </thead>
               <tbody>
                 {livePerf.map((p) => (
-                  <tr key={p.strategy} className="border-b" style={{ borderColor: 'rgba(100,116,139,0.1)' }}>
-                    <td className="py-2.5 pr-4 font-medium text-slate-300">{p.strategy}</td>
-                    <td className="py-2.5 pr-4 text-right">
+                  <tr key={p.strategy}>
+                    <td className="font-medium text-slate-300">{p.strategy}</td>
+                    <td className="text-right">
                       <span className={`font-mono font-semibold ${p.rolling_sharpe > 0 ? 'text-emerald-400' : p.rolling_sharpe < 0 ? 'text-red-400' : 'text-slate-400'}`}>
                         {p.rolling_sharpe > 0 ? '+' : ''}{p.rolling_sharpe.toFixed(3)}
                       </span>
                     </td>
-                    <td className="py-2.5 pr-4 text-right">
+                    <td className="text-right">
                       <span className="font-mono text-blue-300">{p.kelly_fraction.toFixed(2)}%</span>
                     </td>
-                    <td className="py-2.5 pr-4 text-right">
+                    <td className="text-right">
                       <div className="flex items-center justify-end gap-2">
                         <div className="h-1.5 rounded-full w-16 overflow-hidden" style={{ backgroundColor: 'rgba(100,116,139,0.2)' }}>
                           <div className="h-full rounded-full" style={{ width: `${Math.min(p.dynamic_weight / 2 * 100, 100)}%`, backgroundColor: p.dynamic_weight >= 1.0 ? '#22c55e' : '#f59e0b' }} />
@@ -268,10 +268,10 @@ export default function Strategies() {
                         <span className={`font-mono text-xs ${p.dynamic_weight >= 1.0 ? 'text-emerald-400' : 'text-yellow-400'}`}>{p.dynamic_weight.toFixed(2)}x</span>
                       </div>
                     </td>
-                    <td className="py-2.5 pr-4 text-right">
+                    <td className="text-right">
                       <span className={p.win_rate >= 50 ? 'text-emerald-400' : 'text-red-400'}>{p.win_rate}%</span>
                     </td>
-                    <td className="py-2.5 text-right text-slate-400">{p.total_trades}</td>
+                    <td className="text-right text-slate-400">{p.total_trades}</td>
                   </tr>
                 ))}
               </tbody>

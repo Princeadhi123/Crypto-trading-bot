@@ -1180,6 +1180,8 @@ class TradingEngine:
             except Exception as exc:
                 logger.error("Failed to close open positions on stop: %s", exc)
             self.active_positions.clear()
+        # Clear recent signals so stale signals from previous session don't persist
+        self.recent_signals.clear()
         if self.exchange:
             await self.exchange.close()
         await close_public_futures_exchange()

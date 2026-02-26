@@ -60,6 +60,7 @@ async def get_settings(session: AsyncSession = Depends(get_db_session)):
 @router.put("/settings")
 async def update_settings(payload: BotSettingsSchema, session: AsyncSession = Depends(get_db_session)):
     settings = await _get_or_create_settings(session)
+    old_paper_balance = settings.paper_balance
     settings.paper_trading_enabled = payload.paper_trading_enabled
     settings.paper_balance = payload.paper_balance
     settings.max_portfolio_risk_percent = payload.max_portfolio_risk_percent
@@ -73,8 +74,9 @@ async def update_settings(payload: BotSettingsSchema, session: AsyncSession = De
     settings.updated_at = datetime.utcnow()
     await session.commit()
 
-    # Update paper balance immediately in memory (even if bot is stopped) so dashboard reflects change
-    if settings.paper_trading_enabled:
+    # Update paper balance in memory ONLY if user actually changed it in settings form
+    # Don't overwrite in-memory balance when user is just changing other settings (e.g., max drawdown)
+    if settings.paper_trading_enabled and payload.paper_balance != old_paper_balance:
         trading_engine.paper_balance = payload.paper_balance
 
     # Hot-reload safe settings into the running engine (risk params, strategies, symbols)
@@ -195,7 +197,7 @@ async def get_trade_history(
 ):
     query = select(TradeRecord).order_by(desc(TradeRecord.opened_at))
     if symbol:
-        query = query.where(TradeRecord.symbol == symbol)
+        query = query.where(TradeRecord.symbol.ilike(f"%{symbol}%"))
     if status:
         query = query.where(TradeRecord.status == status)
     query = query.offset(offset).limit(limit)
@@ -212,7 +214,7 @@ async def get_trade_count(
 ):
     query = select(func.count(TradeRecord.id))
     if symbol:
-        query = query.where(TradeRecord.symbol == symbol)
+        query = query.where(TradeRecord.symbol.ilike(f"%{symbol}%"))
     if status:
         query = query.where(TradeRecord.status == status)
     result = await session.execute(query)
