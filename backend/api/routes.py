@@ -54,13 +54,19 @@ async def get_bot_status(session: AsyncSession = Depends(get_db_session)):
 @router.get("/settings")
 async def get_settings(session: AsyncSession = Depends(get_db_session)):
     settings = await _get_or_create_settings(session)
-    return _settings_row_to_dict(settings)
+    settings_dict = _settings_row_to_dict(settings)
+    # If bot is running in paper mode, show the actual in-memory balance (not stale DB value)
+    # This reflects the real available cash after positions are opened
+    if trading_engine.is_running and settings.paper_trading_enabled:
+        settings_dict["paper_balance"] = trading_engine.paper_balance
+    return settings_dict
 
 
 @router.put("/settings")
 async def update_settings(payload: BotSettingsSchema, session: AsyncSession = Depends(get_db_session)):
     settings = await _get_or_create_settings(session)
-    old_paper_balance = settings.paper_balance
+    # Use in-memory balance if bot is running, otherwise use DB value
+    old_paper_balance = trading_engine.paper_balance if (trading_engine.is_running and settings.paper_trading_enabled) else settings.paper_balance
     settings.paper_trading_enabled = payload.paper_trading_enabled
     settings.paper_balance = payload.paper_balance
     settings.max_portfolio_risk_percent = payload.max_portfolio_risk_percent
@@ -78,6 +84,8 @@ async def update_settings(payload: BotSettingsSchema, session: AsyncSession = De
     # Don't overwrite in-memory balance when user is just changing other settings (e.g., max drawdown)
     if settings.paper_trading_enabled and payload.paper_balance != old_paper_balance:
         trading_engine.paper_balance = payload.paper_balance
+        # Reset peak portfolio value to new balance to prevent incorrect drawdown calculations
+        trading_engine.risk_manager.peak_portfolio_value = payload.paper_balance
 
     # Hot-reload safe settings into the running engine (risk params, strategies, symbols)
     hot_reload_result = {}

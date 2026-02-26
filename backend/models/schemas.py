@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
 from typing import Optional, List
 from datetime import datetime
 
@@ -21,6 +21,13 @@ class TradeRecordSchema(BaseModel):
     closed_at: Optional[datetime] = None
     notes: Optional[str] = None
     exit_reason: Optional[str] = None
+
+    @field_serializer('opened_at', 'closed_at')
+    def serialize_dt(self, dt: Optional[datetime], _info):
+        """Serialize datetime as UTC ISO format with 'Z' suffix for proper timezone handling in frontend"""
+        if dt is None:
+            return None
+        return dt.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
 
     class Config:
         from_attributes = True
@@ -71,6 +78,13 @@ class ActivePositionSchema(BaseModel):
     opened_at: datetime
     trade_id: int
 
+    @field_serializer('opened_at')
+    def serialize_dt(self, dt: Optional[datetime], _info):
+        """Serialize datetime as UTC ISO format with 'Z' suffix for proper timezone handling in frontend"""
+        if dt is None:
+            return None
+        return dt.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+
 
 class MarketDataSchema(BaseModel):
     symbol: str
@@ -91,6 +105,13 @@ class SignalSchema(BaseModel):
     timestamp: datetime
     details: dict
 
+    @field_serializer('timestamp')
+    def serialize_dt(self, dt: Optional[datetime], _info):
+        """Serialize datetime as UTC ISO format with 'Z' suffix for proper timezone handling in frontend"""
+        if dt is None:
+            return None
+        return dt.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+
 
 class BotStatusSchema(BaseModel):
     is_running: bool
@@ -100,3 +121,10 @@ class BotStatusSchema(BaseModel):
     trades_today: int
     uptime_seconds: float
     last_tick: Optional[datetime] = None
+
+    @field_serializer('last_tick')
+    def serialize_dt(self, dt: Optional[datetime], _info):
+        """Serialize datetime as UTC ISO format with 'Z' suffix for proper timezone handling in frontend"""
+        if dt is None:
+            return None
+        return dt.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
