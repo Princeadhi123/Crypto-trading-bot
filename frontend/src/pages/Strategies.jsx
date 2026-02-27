@@ -238,30 +238,30 @@ export default function Strategies() {
         {livePerf.length > 0 ? (
           <>
             <div className="overflow-x-auto">
-              <table className="data-table">
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                 <thead>
                   <tr>
-                    <th className="text-left">Strategy</th>
-                    <th className="text-right">Sharpe (rolling)</th>
-                    <th className="text-right">Kelly Fraction</th>
-                    <th className="text-right">Dynamic Weight</th>
-                    <th className="text-right">Win Rate</th>
-                    <th className="text-right">Trades</th>
+                    <th style={{ textAlign: 'left', padding: '10px 16px', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)', borderBottom: '1px solid var(--border)', background: 'rgba(255,255,255,0.02)', width: '180px' }}>Strategy</th>
+                    <th style={{ textAlign: 'right', padding: '10px 16px', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)', borderBottom: '1px solid var(--border)', background: 'rgba(255,255,255,0.02)', width: '140px' }}>Sharpe (rolling)</th>
+                    <th style={{ textAlign: 'right', padding: '10px 16px', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)', borderBottom: '1px solid var(--border)', background: 'rgba(255,255,255,0.02)', width: '130px' }}>Kelly Fraction</th>
+                    <th style={{ textAlign: 'right', padding: '10px 16px', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)', borderBottom: '1px solid var(--border)', background: 'rgba(255,255,255,0.02)', width: '200px' }}>Dynamic Weight</th>
+                    <th style={{ textAlign: 'right', padding: '10px 16px', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)', borderBottom: '1px solid var(--border)', background: 'rgba(255,255,255,0.02)', width: '100px' }}>Win Rate</th>
+                    <th style={{ textAlign: 'right', padding: '10px 16px', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)', borderBottom: '1px solid var(--border)', background: 'rgba(255,255,255,0.02)', width: '80px' }}>Trades</th>
                   </tr>
                 </thead>
                 <tbody>
                   {livePerf.map((p) => (
-                    <tr key={p.strategy}>
-                      <td className="font-medium text-slate-300">{p.strategy}</td>
-                      <td className="text-right">
+                    <tr key={p.strategy} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                      <td style={{ padding: '12px 16px', fontSize: '13px', width: '180px' }} className="font-medium text-slate-300">{p.strategy}</td>
+                      <td style={{ padding: '12px 16px', fontSize: '13px', textAlign: 'right', width: '140px' }}>
                         <span className={`font-mono font-semibold ${p.rolling_sharpe > 0 ? 'text-emerald-400' : p.rolling_sharpe < 0 ? 'text-red-400' : 'text-slate-400'}`}>
                           {p.rolling_sharpe > 0 ? '+' : ''}{p.rolling_sharpe.toFixed(3)}
                         </span>
                       </td>
-                      <td className="text-right">
+                      <td style={{ padding: '12px 16px', fontSize: '13px', textAlign: 'right', width: '130px' }}>
                         <span className="font-mono text-blue-300">{p.kelly_fraction.toFixed(2)}%</span>
                       </td>
-                      <td className="text-right">
+                      <td style={{ padding: '12px 16px', fontSize: '13px', textAlign: 'right', width: '200px' }}>
                         <div className="flex items-center justify-end gap-2">
                           <div className="h-1.5 rounded-full w-16 overflow-hidden" style={{ backgroundColor: 'rgba(100,116,139,0.2)' }}>
                             <div className="h-full rounded-full" style={{ width: `${Math.min(p.dynamic_weight / 2 * 100, 100)}%`, backgroundColor: p.dynamic_weight >= 1.0 ? '#22c55e' : '#f59e0b' }} />
@@ -269,10 +269,10 @@ export default function Strategies() {
                           <span className={`font-mono text-xs ${p.dynamic_weight >= 1.0 ? 'text-emerald-400' : 'text-yellow-400'}`}>{p.dynamic_weight.toFixed(2)}x</span>
                         </div>
                       </td>
-                      <td className="text-right">
+                      <td style={{ padding: '12px 16px', fontSize: '13px', textAlign: 'right', width: '100px' }}>
                         <span className={p.win_rate >= 50 ? 'text-emerald-400' : 'text-red-400'}>{p.win_rate}%</span>
                       </td>
-                      <td className="text-right text-slate-400">{p.total_trades}</td>
+                      <td style={{ padding: '12px 16px', fontSize: '13px', textAlign: 'right', width: '80px' }} className="text-slate-400">{p.total_trades}</td>
                     </tr>
                   ))}
                 </tbody>
