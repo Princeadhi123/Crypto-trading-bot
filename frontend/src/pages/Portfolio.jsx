@@ -96,10 +96,10 @@ export default function Portfolio({ wsEvents }) {
       />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard title="Total Equity" value={fmtCurrency(portfolio?.total_equity)} icon={DollarSign} accentColor="#10b981" />
-        <StatCard title="Realized P&L" value={`${realizedPnl >= 0 ? '+' : ''}${fmtCurrency(realizedPnl)}`} icon={realizedPnl >= 0 ? TrendingUp : TrendingDown} accentColor={realizedPnl >= 0 ? '#10b981' : '#ef4444'} />
-        <StatCard title="Daily P&L" value={`${dailyPnl >= 0 ? '+' : ''}${fmtCurrency(dailyPnl)}`} icon={Target} accentColor={dailyPnl >= 0 ? '#10b981' : '#ef4444'} />
-        <StatCard title="Weekly P&L" value={`${weeklyPnl >= 0 ? '+' : ''}${fmtCurrency(weeklyPnl)}`} icon={Award} accentColor={weeklyPnl >= 0 ? '#10b981' : '#ef4444'} />
+        <StatCard title="Total Equity" value={fmtCurrency(portfolio?.total_equity, 4)} icon={DollarSign} accentColor="#10b981" />
+        <StatCard title="Realized P&L" value={`${realizedPnl >= 0 ? '+' : ''}${fmtCurrency(realizedPnl, 4)}`} icon={realizedPnl >= 0 ? TrendingUp : TrendingDown} accentColor={realizedPnl >= 0 ? '#10b981' : '#ef4444'} />
+        <StatCard title="Daily P&L" value={`${dailyPnl >= 0 ? '+' : ''}${fmtCurrency(dailyPnl, 4)}`} icon={Target} accentColor={dailyPnl >= 0 ? '#10b981' : '#ef4444'} />
+        <StatCard title="Weekly P&L" value={`${weeklyPnl >= 0 ? '+' : ''}${fmtCurrency(weeklyPnl, 4)}`} icon={Award} accentColor={weeklyPnl >= 0 ? '#10b981' : '#ef4444'} />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
@@ -131,11 +131,11 @@ export default function Portfolio({ wsEvents }) {
           </div>
           <div className="divider" />
           <div className="space-y-0.5">
-            <InfoRow label="Unrealized P&L" value={fmtCurrency(unrealizedPnl)} valueColor={unrealizedPnl >= 0 ? '#34d399' : '#f87171'} />
+            <InfoRow label="Unrealized P&L" value={fmtCurrency(unrealizedPnl, 4)} valueColor={unrealizedPnl >= 0 ? '#34d399' : '#f87171'} />
             <InfoRow label="Profit Factor" value={`${(portfolio?.profit_factor || 0).toFixed(4)}×`} valueColor="#60a5fa" />
             <InfoRow label="Total Trades" value={portfolio?.total_trades || 0} />
             <InfoRow label="Wins / Losses" value={`${portfolio?.winning_trades || 0} / ${portfolio?.losing_trades || 0}`} />
-            <InfoRow label="Max Drawdown" value={fmtCurrency(portfolio?.max_drawdown)} valueColor="#f59e0b" />
+            <InfoRow label="Max Drawdown" value={fmtCurrency(portfolio?.max_drawdown, 4)} valueColor="#f59e0b" />
           </div>
         </div>
       </div>

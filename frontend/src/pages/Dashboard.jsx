@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react'
+import { flushSync } from 'react-dom'
 import {
   Activity, DollarSign, Target, AlertTriangle,
   Play, Square, Zap, TrendingUp, TrendingDown, BarChart2, X
@@ -53,20 +54,22 @@ export default function Dashboard({ wsEvents }) {
     const latest = wsEvents[0]
     if (!latest) return
     if (latest.event === 'price_update') {
-      // Update portfolio stats FIRST for instant response (matching Portfolio page speed)
-      if (latest.data.portfolio_value !== undefined) {
-        setPortfolio(prev => prev ? {
-          ...prev,
-          total_equity: latest.data.portfolio_value,
-          total_balance: latest.data.portfolio_value,
-          available_balance: latest.data.available_balance,
-          unrealized_pnl: latest.data.unrealized_pnl
-        } : prev)
-      }
-      
-      // Then update prices and positions
       const newPrices = latest.data.prices || {}
-      setPrices(newPrices)
+      
+      // Force immediate synchronous updates without React batching for instant rendering
+      flushSync(() => {
+        setPrices(newPrices)
+        
+        if (latest.data.portfolio_value !== undefined) {
+          setPortfolio(prev => prev ? {
+            ...prev,
+            total_equity: latest.data.portfolio_value,
+            total_balance: latest.data.portfolio_value,
+            available_balance: latest.data.available_balance,
+            unrealized_pnl: latest.data.unrealized_pnl
+          } : prev)
+        }
+      })
       
       setPositions(prevPositions => 
         prevPositions.map(pos => {
@@ -199,14 +202,14 @@ export default function Dashboard({ wsEvents }) {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard
           title="Portfolio Value"
-          value={fmtCurrency(portfolio?.total_equity)}
+          value={fmtCurrency(portfolio?.total_equity, 4)}
           subtitle="Total equity"
           icon={DollarSign}
           accentColor="#10b981"
         />
         <StatCard
           title="Realized P&L"
-          value={`${pnlPositive ? '+' : ''}${fmtCurrency(pnl)}`}
+          value={`${pnlPositive ? '+' : ''}${fmtCurrency(pnl, 4)}`}
           subtitle={`Win rate: ${winRate.toFixed(1)}%`}
           icon={pnlPositive ? TrendingUp : TrendingDown}
           accentColor={pnlPositive ? '#10b981' : '#ef4444'}
@@ -214,7 +217,7 @@ export default function Dashboard({ wsEvents }) {
         <StatCard
           title="Open Positions"
           value={positions.length}
-          subtitle={`Unrealized: ${fmtCurrency(portfolio?.unrealized_pnl)}`}
+          subtitle={`Unrealized: ${fmtCurrency(portfolio?.unrealized_pnl, 4)}`}
           icon={Activity}
           accentColor="#3b82f6"
         />
@@ -365,7 +368,7 @@ export default function Dashboard({ wsEvents }) {
                       <div className="flex items-center gap-2">
                         <div className="text-right">
                           <div className={`text-[14px] font-bold mono ${isProfit ? 'pnl-positive' : 'pnl-negative'}`}>
-                            {isProfit ? '+' : ''}{fmtCurrency(pos.unrealized_pnl)}
+                            {isProfit ? '+' : ''}{fmtCurrency(pos.unrealized_pnl, 4)}
                           </div>
                           <div className={`text-[11px] ${isProfit ? 'pnl-positive' : 'pnl-negative'}`}>
                             {fmtPct(pos.unrealized_pnl_percent)}
@@ -468,7 +471,7 @@ export default function Dashboard({ wsEvents }) {
         />
         <StatCard
           title="Max Drawdown"
-          value={fmtCurrency(portfolio?.max_drawdown)}
+          value={fmtCurrency(portfolio?.max_drawdown, 4)}
           icon={AlertTriangle}
           accentColor="#f59e0b"
         />
