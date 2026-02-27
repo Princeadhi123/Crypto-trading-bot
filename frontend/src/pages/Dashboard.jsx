@@ -45,7 +45,7 @@ export default function Dashboard({ wsEvents }) {
   useEffect(() => {
     setLoading(true)
     fetchAll().finally(() => setLoading(false))
-    const interval = setInterval(fetchAll, 1000)  // 1 second for real-time updates
+    const interval = setInterval(fetchAll, 1000)  // 1 second polling to match Portfolio page speed
     return () => clearInterval(interval)
   }, [fetchAll])
 
@@ -53,16 +53,26 @@ export default function Dashboard({ wsEvents }) {
     const latest = wsEvents[0]
     if (!latest) return
     if (latest.event === 'price_update') {
+      // Update portfolio stats FIRST for instant response (matching Portfolio page speed)
+      if (latest.data.portfolio_value !== undefined) {
+        setPortfolio(prev => prev ? {
+          ...prev,
+          total_equity: latest.data.portfolio_value,
+          total_balance: latest.data.portfolio_value,
+          available_balance: latest.data.available_balance,
+          unrealized_pnl: latest.data.unrealized_pnl
+        } : prev)
+      }
+      
+      // Then update prices and positions
       const newPrices = latest.data.prices || {}
       setPrices(newPrices)
       
-      // Update positions with new prices in real-time
       setPositions(prevPositions => 
         prevPositions.map(pos => {
           const newPrice = newPrices[pos.symbol]
           if (!newPrice) return pos
           
-          // Recalculate unrealized PnL with new price
           const priceDiff = pos.side === 'BUY' 
             ? (newPrice - pos.entry_price) 
             : (pos.entry_price - newPrice)
@@ -77,17 +87,6 @@ export default function Dashboard({ wsEvents }) {
           }
         })
       )
-      
-      // Update portfolio stats from WebSocket data
-      if (latest.data.portfolio_value !== undefined) {
-        setPortfolio(prev => prev ? {
-          ...prev,
-          total_equity: latest.data.portfolio_value,
-          total_balance: latest.data.portfolio_value,
-          available_balance: latest.data.available_balance,
-          unrealized_pnl: latest.data.unrealized_pnl
-        } : prev)
-      }
     } else if (latest.event === 'new_trade' || latest.event === 'trade_closed') {
       fetchAll()
     }
