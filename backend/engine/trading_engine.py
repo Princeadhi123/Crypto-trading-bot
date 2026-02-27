@@ -1290,5 +1290,15 @@ class TradingEngine:
             })
         return result
 
+    async def close_position_by_symbol(self, symbol: str, reason: str = "manual_close"):
+        """Manually close a position at current market price"""
+        position = self.active_positions.get(symbol)
+        if position is None:
+            logger.warning("Cannot close position %s - not found in active positions", symbol)
+            return
+        exit_price = self.market_prices.get(symbol, position.current_price)
+        await self._close_position(symbol, exit_price, reason)
+        logger.info("Manually closed position %s at $%.4f (reason: %s)", symbol, exit_price, reason)
+
 
 trading_engine = TradingEngine()

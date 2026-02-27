@@ -195,6 +195,13 @@ async def get_active_positions():
     return trading_engine.get_active_positions()
 
 
+@router.post("/positions/close")
+async def close_position_manually(symbol: str = Query(...)):
+    """Manually close an open position at current market price"""
+    await trading_engine.close_position_by_symbol(symbol, reason="manual_close")
+    return {"message": f"Position {symbol} closed successfully"}
+
+
 @router.get("/trades")
 async def get_trade_history(
     limit: int = Query(default=50, ge=1, le=500),

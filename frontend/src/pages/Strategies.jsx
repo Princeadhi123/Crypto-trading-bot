@@ -231,55 +231,61 @@ export default function Strategies() {
         </div>
       )}
 
-      {livePerf.length > 0 && (
-        <div className="card space-y-4">
-          <h2 className="text-[13px] font-semibold flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
-            <Cpu size={14} style={{ color: '#8b5cf6' }} /> Institutional Metrics (Live)
-          </h2>
-          <div className="overflow-x-auto">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th className="text-left">Strategy</th>
-                  <th className="text-right">Sharpe (rolling)</th>
-                  <th className="text-right">Kelly Fraction</th>
-                  <th className="text-right">Dynamic Weight</th>
-                  <th className="text-right">Win Rate</th>
-                  <th className="text-right">Trades</th>
-                </tr>
-              </thead>
-              <tbody>
-                {livePerf.map((p) => (
-                  <tr key={p.strategy}>
-                    <td className="font-medium text-slate-300">{p.strategy}</td>
-                    <td className="text-right">
-                      <span className={`font-mono font-semibold ${p.rolling_sharpe > 0 ? 'text-emerald-400' : p.rolling_sharpe < 0 ? 'text-red-400' : 'text-slate-400'}`}>
-                        {p.rolling_sharpe > 0 ? '+' : ''}{p.rolling_sharpe.toFixed(3)}
-                      </span>
-                    </td>
-                    <td className="text-right">
-                      <span className="font-mono text-blue-300">{p.kelly_fraction.toFixed(2)}%</span>
-                    </td>
-                    <td className="text-right">
-                      <div className="flex items-center justify-end gap-2">
-                        <div className="h-1.5 rounded-full w-16 overflow-hidden" style={{ backgroundColor: 'rgba(100,116,139,0.2)' }}>
-                          <div className="h-full rounded-full" style={{ width: `${Math.min(p.dynamic_weight / 2 * 100, 100)}%`, backgroundColor: p.dynamic_weight >= 1.0 ? '#22c55e' : '#f59e0b' }} />
-                        </div>
-                        <span className={`font-mono text-xs ${p.dynamic_weight >= 1.0 ? 'text-emerald-400' : 'text-yellow-400'}`}>{p.dynamic_weight.toFixed(2)}x</span>
-                      </div>
-                    </td>
-                    <td className="text-right">
-                      <span className={p.win_rate >= 50 ? 'text-emerald-400' : 'text-red-400'}>{p.win_rate}%</span>
-                    </td>
-                    <td className="text-right text-slate-400">{p.total_trades}</td>
+      <div className="card space-y-4">
+        <h2 className="text-[13px] font-semibold flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
+          <Cpu size={14} style={{ color: '#8b5cf6' }} /> Institutional Metrics (Live)
+        </h2>
+        {livePerf.length > 0 ? (
+          <>
+            <div className="overflow-x-auto">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th className="text-left">Strategy</th>
+                    <th className="text-right">Sharpe (rolling)</th>
+                    <th className="text-right">Kelly Fraction</th>
+                    <th className="text-right">Dynamic Weight</th>
+                    <th className="text-right">Win Rate</th>
+                    <th className="text-right">Trades</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <p className="text-xs text-slate-500">Dynamic weights update after each closed trade. Kelly fraction = half-Kelly criterion based on rolling win rate and reward/risk ratio.</p>
-        </div>
-      )}
+                </thead>
+                <tbody>
+                  {livePerf.map((p) => (
+                    <tr key={p.strategy}>
+                      <td className="font-medium text-slate-300">{p.strategy}</td>
+                      <td className="text-right">
+                        <span className={`font-mono font-semibold ${p.rolling_sharpe > 0 ? 'text-emerald-400' : p.rolling_sharpe < 0 ? 'text-red-400' : 'text-slate-400'}`}>
+                          {p.rolling_sharpe > 0 ? '+' : ''}{p.rolling_sharpe.toFixed(3)}
+                        </span>
+                      </td>
+                      <td className="text-right">
+                        <span className="font-mono text-blue-300">{p.kelly_fraction.toFixed(2)}%</span>
+                      </td>
+                      <td className="text-right">
+                        <div className="flex items-center justify-end gap-2">
+                          <div className="h-1.5 rounded-full w-16 overflow-hidden" style={{ backgroundColor: 'rgba(100,116,139,0.2)' }}>
+                            <div className="h-full rounded-full" style={{ width: `${Math.min(p.dynamic_weight / 2 * 100, 100)}%`, backgroundColor: p.dynamic_weight >= 1.0 ? '#22c55e' : '#f59e0b' }} />
+                          </div>
+                          <span className={`font-mono text-xs ${p.dynamic_weight >= 1.0 ? 'text-emerald-400' : 'text-yellow-400'}`}>{p.dynamic_weight.toFixed(2)}x</span>
+                        </div>
+                      </td>
+                      <td className="text-right">
+                        <span className={p.win_rate >= 50 ? 'text-emerald-400' : 'text-red-400'}>{p.win_rate}%</span>
+                      </td>
+                      <td className="text-right text-slate-400">{p.total_trades}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-xs text-slate-500">Dynamic weights update after each closed trade. Kelly fraction = half-Kelly criterion based on rolling win rate and reward/risk ratio.</p>
+          </>
+        ) : (
+          <p className="text-sm text-center py-8" style={{ color: 'var(--text-muted)' }}>
+            No performance data yet. Start the bot and close some trades to populate institutional metrics.
+          </p>
+        )}
+      </div>
     </div>
   )
 }

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import {
   Activity, DollarSign, Target, AlertTriangle,
-  Play, Square, Zap, TrendingUp, TrendingDown, BarChart2
+  Play, Square, Zap, TrendingUp, TrendingDown, BarChart2, X
 } from 'lucide-react'
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 import { botApi } from '../api'
@@ -19,6 +19,7 @@ export default function Dashboard({ wsEvents }) {
   const [recentSignals, setRecentSignals] = useState([])
   const [loading, setLoading] = useState(false)
   const [botActionLoading, setBotActionLoading] = useState(false)
+  const [closingPosition, setClosingPosition] = useState(null)
 
   const fetchAll = useCallback(async () => {
     try {
@@ -71,6 +72,22 @@ export default function Dashboard({ wsEvents }) {
       console.error('Bot toggle error:', e)
     } finally {
       setBotActionLoading(false)
+    }
+  }
+
+  const handleClosePosition = async (symbol) => {
+    if (!window.confirm(`Close position ${symbol} at current market price?`)) {
+      return
+    }
+    setClosingPosition(symbol)
+    try {
+      await botApi.closePosition(symbol)
+      await fetchAll()
+    } catch (e) {
+      console.error('Close position error:', e)
+      alert(`Failed to close position: ${e.message}`)
+    } finally {
+      setClosingPosition(null)
     }
   }
 
@@ -279,13 +296,24 @@ export default function Dashboard({ wsEvents }) {
                           {pos.symbol}
                         </span>
                       </div>
-                      <div className="text-right">
-                        <div className={`text-[14px] font-bold mono ${isProfit ? 'pnl-positive' : 'pnl-negative'}`}>
-                          {isProfit ? '+' : ''}{fmtCurrency(pos.unrealized_pnl)}
+                      <div className="flex items-center gap-2">
+                        <div className="text-right">
+                          <div className={`text-[14px] font-bold mono ${isProfit ? 'pnl-positive' : 'pnl-negative'}`}>
+                            {isProfit ? '+' : ''}{fmtCurrency(pos.unrealized_pnl)}
+                          </div>
+                          <div className={`text-[11px] ${isProfit ? 'pnl-positive' : 'pnl-negative'}`}>
+                            {fmtPct(pos.unrealized_pnl_percent)}
+                          </div>
                         </div>
-                        <div className={`text-[11px] ${isProfit ? 'pnl-positive' : 'pnl-negative'}`}>
-                          {fmtPct(pos.unrealized_pnl_percent)}
-                        </div>
+                        <button
+                          onClick={() => handleClosePosition(pos.symbol)}
+                          disabled={closingPosition === pos.symbol}
+                          className="p-1.5 rounded-lg transition-all hover:bg-red-500/10"
+                          style={{ color: '#f87171', opacity: closingPosition === pos.symbol ? 0.5 : 1 }}
+                          title="Close position at market price"
+                        >
+                          <X size={16} />
+                        </button>
                       </div>
                     </div>
                     <div className="grid grid-cols-3 gap-2 text-[11px]" style={{ color: 'var(--text-muted)' }}>

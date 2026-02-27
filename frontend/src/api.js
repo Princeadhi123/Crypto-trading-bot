@@ -13,6 +13,7 @@ export const botApi = {
   updateSettings: (settings) => apiClient.put('/settings', settings),
   getPortfolio: () => apiClient.get('/portfolio'),
   getPositions: () => apiClient.get('/positions'),
+  closePosition: (symbol) => apiClient.post('/positions/close', null, { params: { symbol } }),
   getTrades: (params) => apiClient.get('/trades', { params }),
   getTradeCount: (params) => apiClient.get('/trades/count', { params }),
   getMarketPrices: () => apiClient.get('/market/prices'),
