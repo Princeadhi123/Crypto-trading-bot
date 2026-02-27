@@ -134,7 +134,12 @@ export default function Portfolio() {
                 ))}
               </Pie>
               <Legend iconType="circle" iconSize={7} formatter={(v) => <span style={{ color: 'var(--text-secondary)', fontSize: 11 }}>{v}</span>} />
-              <Tooltip contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8 }} formatter={(v) => [v, 'Trades']} />
+              <Tooltip 
+                contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8 }} 
+                itemStyle={{ color: '#e2e8f0' }}
+                labelStyle={{ color: '#cbd5e1', fontWeight: 600 }}
+                formatter={(v) => [v, 'Trades']} 
+              />
             </PieChart>
           </ResponsiveContainer>
         </div>
