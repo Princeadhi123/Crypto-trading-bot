@@ -45,7 +45,7 @@ export default function Dashboard({ wsEvents }) {
   useEffect(() => {
     setLoading(true)
     fetchAll().finally(() => setLoading(false))
-    const interval = setInterval(fetchAll, 15000)
+    const interval = setInterval(fetchAll, 1000)  // 1 second for real-time updates
     return () => clearInterval(interval)
   }, [fetchAll])
 
@@ -53,7 +53,40 @@ export default function Dashboard({ wsEvents }) {
     const latest = wsEvents[0]
     if (!latest) return
     if (latest.event === 'price_update') {
-      setPrices(latest.data.prices || {})
+      const newPrices = latest.data.prices || {}
+      setPrices(newPrices)
+      
+      // Update positions with new prices in real-time
+      setPositions(prevPositions => 
+        prevPositions.map(pos => {
+          const newPrice = newPrices[pos.symbol]
+          if (!newPrice) return pos
+          
+          // Recalculate unrealized PnL with new price
+          const priceDiff = pos.side === 'BUY' 
+            ? (newPrice - pos.entry_price) 
+            : (pos.entry_price - newPrice)
+          const unrealized_pnl = priceDiff * pos.quantity
+          const unrealized_pnl_percent = (priceDiff / pos.entry_price) * 100
+          
+          return {
+            ...pos,
+            current_price: newPrice,
+            unrealized_pnl,
+            unrealized_pnl_percent
+          }
+        })
+      )
+      
+      // Update portfolio stats from WebSocket data
+      if (latest.data.portfolio_value !== undefined) {
+        setPortfolio(prev => prev ? {
+          ...prev,
+          total_balance: latest.data.portfolio_value,
+          available_balance: latest.data.available_balance,
+          unrealized_pnl: latest.data.unrealized_pnl
+        } : prev)
+      }
     } else if (latest.event === 'new_trade' || latest.event === 'trade_closed') {
       fetchAll()
     }

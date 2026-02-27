@@ -63,7 +63,7 @@ PRICE_SYMBOLS = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "DOGE/USDT", "X
 
 
 async def _live_price_refresh_loop():
-    """Background task: fetches real-time prices from Binance public API every 30s.
+    """Background task: fetches real-time prices from Binance public API every 1s.
     Runs independently of the trading bot — prices stay current even when bot is stopped."""
     public_exchange = ccxt.binance({"options": {"defaultType": "spot"}})
     logger.info("Live price refresh loop started")
@@ -79,7 +79,7 @@ async def _live_price_refresh_loop():
                 raise
             except Exception as exc:
                 logger.warning("Live price refresh failed: %s", exc)
-            await asyncio.sleep(30)
+            await asyncio.sleep(1)  # 1 second for real-time updates
     finally:
         try:
             await public_exchange.close()

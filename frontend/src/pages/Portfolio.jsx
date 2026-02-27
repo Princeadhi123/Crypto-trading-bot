@@ -30,7 +30,7 @@ function MeterBar({ label, value, max, color }) {
   )
 }
 
-export default function Portfolio() {
+export default function Portfolio({ wsEvents }) {
   const [portfolio, setPortfolio] = useState(null)
   const [pnlChart, setPnlChart] = useState([])
   const [strategyPerf, setStrategyPerf] = useState([])
@@ -55,9 +55,26 @@ export default function Portfolio() {
 
   useEffect(() => {
     fetchData()
-    const interval = setInterval(fetchData, 30000)
+    const interval = setInterval(fetchData, 1000)  // 1 second for real-time updates
     return () => clearInterval(interval)
   }, [])
+
+  // WebSocket real-time updates for instant P&L changes
+  useEffect(() => {
+    const latest = wsEvents?.[0]
+    if (!latest) return
+    if (latest.event === 'price_update' && latest.data.portfolio_value !== undefined) {
+      setPortfolio(prev => prev ? {
+        ...prev,
+        total_equity: latest.data.portfolio_value,
+        total_balance: latest.data.portfolio_value,
+        available_balance: latest.data.available_balance,
+        unrealized_pnl: latest.data.unrealized_pnl
+      } : prev)
+    } else if (latest.event === 'new_trade' || latest.event === 'trade_closed') {
+      fetchData()
+    }
+  }, [wsEvents])
 
   const winRate = portfolio?.win_rate || 0
   const drawdown = portfolio?.current_drawdown || 0

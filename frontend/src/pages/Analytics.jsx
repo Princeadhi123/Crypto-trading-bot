@@ -13,9 +13,9 @@ const SENTIMENT_COLORS = {
   'Extreme Greed': { color: '#22c55e', bg: 'rgba(34,197,94,0.1)', bar: '#22c55e' },
 }
 
-export default function Analytics() {
-  const [varReport, setVarReport] = useState(null)
+export default function Analytics({ wsEvents }) {
   const [sentiment, setSentiment] = useState(null)
+  const [varData, setVarData] = useState(null)
   const [fundingRates, setFundingRates] = useState([])
   const [loading, setLoading] = useState(true)
 
@@ -26,7 +26,7 @@ export default function Analytics() {
         botApi.getSentiment(),
         botApi.getFundingRates(),
       ])
-      setVarReport(varRes.data)
+      setVarData(varRes.data)
       setSentiment(sentRes.data)
       setFundingRates(fundRes.data)
     } catch (e) {
@@ -38,9 +38,18 @@ export default function Analytics() {
 
   useEffect(() => {
     fetchAll()
-    const interval = setInterval(fetchAll, 60000)
+    const interval = setInterval(fetchAll, 1000)  // 1 second for real-time updates
     return () => clearInterval(interval)
   }, [])
+
+  // WebSocket real-time updates
+  useEffect(() => {
+    const latest = wsEvents?.[0]
+    if (!latest) return
+    if (latest.event === 'new_trade' || latest.event === 'trade_closed') {
+      fetchAll()
+    }
+  }, [wsEvents])
 
   const sentimentStyle = SENTIMENT_COLORS[sentiment?.classification] || SENTIMENT_COLORS['Neutral']
 
@@ -99,20 +108,20 @@ export default function Analytics() {
           <ShieldAlert size={16} className="text-red-400" /> Portfolio Risk (VaR / CVaR)
           <span className="text-xs text-slate-500 font-normal ml-1">Basel III standard</span>
         </h2>
-        {varReport ? (
+        {varData ? (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <div>
-              <InfoRow label="VaR 95% (daily)" value={`$${varReport.var_95}`} valueColor="#f87171" />
-              <InfoRow label="VaR 99% (daily)" value={`$${varReport.var_99}`} valueColor="#ef4444" />
-              <InfoRow label="CVaR 95% (Expected Shortfall)" value={`$${varReport.cvar_95}`} valueColor="#fb923c" />
-              <InfoRow label="CVaR 99%" value={`$${varReport.cvar_99}`} valueColor="#f97316" />
+              <InfoRow label="VaR 95% (daily)" value={`$${varData.var_95}`} valueColor="#f87171" />
+              <InfoRow label="VaR 99% (daily)" value={`$${varData.var_99}`} valueColor="#ef4444" />
+              <InfoRow label="CVaR 95% (Expected Shortfall)" value={`$${varData.cvar_95}`} valueColor="#fb923c" />
+              <InfoRow label="CVaR 99%" value={`$${varData.cvar_99}`} valueColor="#f97316" />
             </div>
             <div>
-              <InfoRow label="Daily Volatility" value={`${varReport.daily_volatility}%`} />
-              <InfoRow label="Annualized Volatility" value={`${varReport.annualized_volatility}%`} />
-              <InfoRow label="Sharpe Ratio" value={varReport.sharpe_ratio.toFixed(3)} valueColor={varReport.sharpe_ratio > 1 ? '#34d399' : varReport.sharpe_ratio > 0 ? '#94a3b8' : '#f87171'} />
-              <InfoRow label="Sortino Ratio" value={varReport.sortino_ratio.toFixed(3)} valueColor={varReport.sortino_ratio > 1 ? '#34d399' : varReport.sortino_ratio > 0 ? '#94a3b8' : '#f87171'} />
-              <InfoRow label="Worst Single Trade" value={`-$${varReport.max_observed_loss}`} valueColor="#f87171" />
+              <InfoRow label="Daily Volatility" value={`${varData.daily_volatility}%`} />
+              <InfoRow label="Annualized Volatility" value={`${varData.annualized_volatility}%`} />
+              <InfoRow label="Sharpe Ratio" value={varData.sharpe_ratio.toFixed(3)} valueColor={varData.sharpe_ratio > 1 ? '#34d399' : varData.sharpe_ratio > 0 ? '#94a3b8' : '#f87171'} />
+              <InfoRow label="Sortino Ratio" value={varData.sortino_ratio.toFixed(3)} valueColor={varData.sortino_ratio > 1 ? '#34d399' : varData.sortino_ratio > 0 ? '#94a3b8' : '#f87171'} />
+              <InfoRow label="Worst Single Trade" value={`-$${varData.max_observed_loss}`} valueColor="#f87171" />
             </div>
           </div>
         ) : (

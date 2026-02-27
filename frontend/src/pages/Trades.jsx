@@ -73,6 +73,8 @@ export default function Trades() {
 
   useEffect(() => {
     fetchTrades()
+    const interval = setInterval(fetchTrades, 1000)  // 1 second for real-time updates
+    return () => clearInterval(interval)
   }, [fetchTrades])
 
   useEffect(() => {

@@ -58,7 +58,7 @@ const colorStyles = {
   teal: { bg: 'rgba(20,184,166,0.1)', border: 'rgba(20,184,166,0.25)', text: '#2dd4bf' },
 }
 
-export default function Strategies() {
+export default function Strategies({ wsEvents }) {
   const [strategies, setStrategies] = useState([])
   const [performance, setPerformance] = useState([])
   const [livePerf, setLivePerf] = useState([])
@@ -86,7 +86,18 @@ export default function Strategies() {
 
   useEffect(() => {
     fetchData()
+    const interval = setInterval(fetchData, 1000)  // 1 second for real-time updates
+    return () => clearInterval(interval)
   }, [])
+
+  // WebSocket real-time updates
+  useEffect(() => {
+    const latest = wsEvents?.[0]
+    if (!latest) return
+    if (latest.event === 'new_trade' || latest.event === 'trade_closed') {
+      fetchData()
+    }
+  }, [wsEvents])
 
   const toggleStrategy = async (id) => {
     try {

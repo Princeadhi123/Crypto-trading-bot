@@ -148,10 +148,10 @@ export default function App() {
         <main className="flex-1 overflow-auto" style={{ backgroundColor: 'var(--bg-base)' }}>
           <Routes>
             <Route path="/" element={<Dashboard wsEvents={wsEvents} />} />
-            <Route path="/strategies" element={<Strategies />} />
-            <Route path="/portfolio" element={<Portfolio />} />
+            <Route path="/strategies" element={<Strategies wsEvents={wsEvents} />} />
+            <Route path="/portfolio" element={<Portfolio wsEvents={wsEvents} />} />
             <Route path="/trades" element={<Trades />} />
-            <Route path="/analytics" element={<Analytics />} />
+            <Route path="/analytics" element={<Analytics wsEvents={wsEvents} />} />
             <Route path="/settings" element={<SettingsPage />} />
           </Routes>
         </main>

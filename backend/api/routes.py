@@ -84,8 +84,10 @@ async def update_settings(payload: BotSettingsSchema, session: AsyncSession = De
     # Don't overwrite in-memory balance when user is just changing other settings (e.g., max drawdown)
     if settings.paper_trading_enabled and payload.paper_balance != old_paper_balance:
         trading_engine.paper_balance = payload.paper_balance
-        # Reset peak portfolio value to new balance to prevent incorrect drawdown calculations
-        trading_engine.risk_manager.peak_portfolio_value = payload.paper_balance
+        # Reset peak portfolio value to current total portfolio value (balance + positions)
+        # This ensures drawdown calculation is accurate immediately after balance change
+        current_portfolio_value = trading_engine._compute_portfolio_value()
+        trading_engine.risk_manager.peak_portfolio_value = current_portfolio_value
 
     # Hot-reload safe settings into the running engine (risk params, strategies, symbols)
     hot_reload_result = {}
