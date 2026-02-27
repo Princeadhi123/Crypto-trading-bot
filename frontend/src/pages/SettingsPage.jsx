@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { Settings, Save, AlertTriangle, Plus, X, Key, Zap } from 'lucide-react'
 import { botApi } from '../api'
-import { PageHeader } from '../components/ui'
+import { PageHeader, fmtCurrency } from '../components/ui'
 
 const AVAILABLE_SYMBOLS = [
   'BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT',
@@ -171,9 +171,10 @@ export default function SettingsPage() {
               <input
                 type="number"
                 value={settings.paper_balance}
-                onChange={e => setSettings(p => ({ ...p, paper_balance: Number(e.target.value) }))}
+                onChange={e => setSettings(p => ({ ...p, paper_balance: Number(Number(e.target.value).toFixed(4)) }))}
                 min={100}
                 max={1000000}
+                step={0.01}
                 className="w-48 px-3 py-2 rounded-lg text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
                 style={{ backgroundColor: '#1a2540', border: '1px solid rgba(100,116,139,0.35)' }}
               />

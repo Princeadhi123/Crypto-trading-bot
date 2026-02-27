@@ -16,6 +16,7 @@ export default function Dashboard({ wsEvents }) {
   const [portfolio, setPortfolio] = useState(null)
   const [positions, setPositions] = useState([])
   const [prices, setPrices] = useState({})
+  const [prevPrices, setPrevPrices] = useState({})
   const [pnlChart, setPnlChart] = useState([])
   const [recentSignals, setRecentSignals] = useState([])
   const [loading, setLoading] = useState(false)
@@ -55,9 +56,8 @@ export default function Dashboard({ wsEvents }) {
     if (!latest) return
     if (latest.event === 'price_update') {
       const newPrices = latest.data.prices || {}
-      
-      // Force immediate synchronous updates without React batching for instant rendering
       flushSync(() => {
+        setPrevPrices(prices)
         setPrices(newPrices)
         
         if (latest.data.portfolio_value !== undefined) {
@@ -289,28 +289,37 @@ export default function Dashboard({ wsEvents }) {
             Market Prices
           </h2>
           <div className="space-y-0">
-            {Object.entries(prices).slice(0, 6).map(([symbol, price]) => (
-              <div
-                key={symbol}
-                className="flex items-center justify-between py-2.5"
-                style={{ borderBottom: '1px solid var(--border)' }}
-              >
-                <div className="flex items-center gap-2">
-                  <div
-                    className="w-6 h-6 rounded-lg flex items-center justify-center text-[9px] font-bold"
-                    style={{ background: 'rgba(16,185,129,0.1)', color: '#10b981' }}
-                  >
-                    {symbol.slice(0, 2)}
+            {Object.entries(prices).slice(0, 6).map(([symbol, price]) => {
+              const prevPrice = prevPrices[symbol]
+              const priceNum = Number(price)
+              const prevPriceNum = Number(prevPrice)
+              const isUp = prevPrice && priceNum > prevPriceNum
+              const isDown = prevPrice && priceNum < prevPriceNum
+              const priceColor = isUp ? '#10b981' : isDown ? '#ef4444' : 'var(--text-primary)'
+              
+              return (
+                <div
+                  key={symbol}
+                  className="flex items-center justify-between py-2.5"
+                  style={{ borderBottom: '1px solid var(--border)' }}
+                >
+                  <div className="flex items-center gap-2">
+                    <div
+                      className="w-6 h-6 rounded-lg flex items-center justify-center text-[9px] font-bold"
+                      style={{ background: 'rgba(16,185,129,0.1)', color: '#10b981' }}
+                    >
+                      {symbol.slice(0, 2)}
+                    </div>
+                    <span className="text-[13px] font-medium" style={{ color: 'var(--text-secondary)' }}>
+                      {symbol.replace('/USDT', '')}
+                    </span>
                   </div>
-                  <span className="text-[13px] font-medium" style={{ color: 'var(--text-secondary)' }}>
-                    {symbol.replace('/USDT', '')}
+                  <span className="text-[13px] font-semibold mono" style={{ color: priceColor }}>
+                    {fmtPrice(priceNum)}
                   </span>
                 </div>
-                <span className="text-[13px] font-semibold mono" style={{ color: 'var(--text-primary)' }}>
-                  {fmtPrice(Number(price))}
-                </span>
-              </div>
-            ))}
+              )
+            })}
             {Object.keys(prices).length === 0 && (
               <p className="text-[12px] text-center py-6" style={{ color: 'var(--text-muted)' }}>
                 Waiting for price data…
