@@ -124,6 +124,22 @@ export default function Dashboard({ wsEvents }) {
     }
   }
 
+  const handleCloseAllPositions = async () => {
+    if (!positions.length) return
+    if (!confirm(`Close all ${positions.length} open position(s) at market price?`)) return
+    
+    setClosingPosition('all')
+    try {
+      await Promise.all(positions.map(pos => botApi.closePosition(pos.symbol)))
+      await fetchAll()
+    } catch (e) {
+      console.error('Close all positions error:', e)
+      alert(`Failed to close all positions: ${e.message}`)
+    } finally {
+      setClosingPosition(null)
+    }
+  }
+
   const isRunning = status?.is_running
   const pnl = portfolio?.realized_pnl || 0
   const pnlPositive = pnl >= 0
@@ -304,9 +320,26 @@ export default function Dashboard({ wsEvents }) {
       {/* ── Positions + Signals ─────────────────────────────────── */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
         <div className="card">
-          <h2 className="text-[13px] font-semibold mb-4" style={{ color: 'var(--text-primary)' }}>
-            Open Positions
-          </h2>
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-[13px] font-semibold" style={{ color: 'var(--text-primary)' }}>
+              Open Positions
+            </h2>
+            {positions.length > 0 && (
+              <button
+                onClick={handleCloseAllPositions}
+                disabled={closingPosition === 'all'}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all"
+                style={{
+                  backgroundColor: 'rgba(239,68,68,0.1)',
+                  color: '#f87171',
+                  border: '1px solid rgba(239,68,68,0.2)',
+                  opacity: closingPosition === 'all' ? 0.5 : 1
+                }}
+              >
+                {closingPosition === 'all' ? 'Closing...' : 'Close All'}
+              </button>
+            )}
+          </div>
           {positions.length === 0 ? (
             <EmptyState icon={Activity} title="No open positions" description="Signals will be executed automatically once the bot is running" />
           ) : (

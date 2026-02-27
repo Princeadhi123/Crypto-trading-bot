@@ -19,6 +19,15 @@ export default function Analytics({ wsEvents }) {
   const [fundingRates, setFundingRates] = useState([])
   const [loading, setLoading] = useState(true)
 
+  const fetchVarOnly = async () => {
+    try {
+      const varRes = await botApi.getVarReport()
+      setVarData(varRes.data)
+    } catch (e) {
+      console.error(e)
+    }
+  }
+
   const fetchAll = async () => {
     try {
       const [varRes, sentRes, fundRes] = await Promise.all([
@@ -38,7 +47,7 @@ export default function Analytics({ wsEvents }) {
 
   useEffect(() => {
     fetchAll()
-    const interval = setInterval(fetchAll, 1000)  // 1 second for real-time updates
+    const interval = setInterval(fetchVarOnly, 1000)  // Only update VaR every second for speed
     return () => clearInterval(interval)
   }, [])
 
@@ -46,8 +55,10 @@ export default function Analytics({ wsEvents }) {
   useEffect(() => {
     const latest = wsEvents?.[0]
     if (!latest) return
-    if (latest.event === 'new_trade' || latest.event === 'trade_closed') {
-      fetchAll()
+    if (latest.event === 'price_update') {
+      fetchVarOnly()  // Fast VaR-only update on price changes
+    } else if (latest.event === 'new_trade' || latest.event === 'trade_closed') {
+      fetchAll()  // Full refresh on trades
     }
   }, [wsEvents])
 
@@ -111,17 +122,17 @@ export default function Analytics({ wsEvents }) {
         {varData ? (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <div>
-              <InfoRow label="VaR 95% (daily)" value={`$${varData.var_95}`} valueColor="#f87171" />
-              <InfoRow label="VaR 99% (daily)" value={`$${varData.var_99}`} valueColor="#ef4444" />
-              <InfoRow label="CVaR 95% (Expected Shortfall)" value={`$${varData.cvar_95}`} valueColor="#fb923c" />
-              <InfoRow label="CVaR 99%" value={`$${varData.cvar_99}`} valueColor="#f97316" />
+              <InfoRow label="VaR 95% (daily)" value={`$${Number(varData.var_95).toFixed(4)}`} valueColor="#f87171" />
+              <InfoRow label="VaR 99% (daily)" value={`$${Number(varData.var_99).toFixed(4)}`} valueColor="#ef4444" />
+              <InfoRow label="CVaR 95% (Expected Shortfall)" value={`$${Number(varData.cvar_95).toFixed(4)}`} valueColor="#fb923c" />
+              <InfoRow label="CVaR 99%" value={`$${Number(varData.cvar_99).toFixed(4)}`} valueColor="#f97316" />
             </div>
             <div>
-              <InfoRow label="Daily Volatility" value={`${varData.daily_volatility}%`} />
-              <InfoRow label="Annualized Volatility" value={`${varData.annualized_volatility}%`} />
-              <InfoRow label="Sharpe Ratio" value={varData.sharpe_ratio.toFixed(3)} valueColor={varData.sharpe_ratio > 1 ? '#34d399' : varData.sharpe_ratio > 0 ? '#94a3b8' : '#f87171'} />
-              <InfoRow label="Sortino Ratio" value={varData.sortino_ratio.toFixed(3)} valueColor={varData.sortino_ratio > 1 ? '#34d399' : varData.sortino_ratio > 0 ? '#94a3b8' : '#f87171'} />
-              <InfoRow label="Worst Single Trade" value={`-$${varData.max_observed_loss}`} valueColor="#f87171" />
+              <InfoRow label="Daily Volatility" value={`${Number(varData.daily_volatility).toFixed(4)}%`} />
+              <InfoRow label="Annualized Volatility" value={`${Number(varData.annualized_volatility).toFixed(4)}%`} />
+              <InfoRow label="Sharpe Ratio" value={varData.sharpe_ratio.toFixed(4)} valueColor={varData.sharpe_ratio > 1 ? '#34d399' : varData.sharpe_ratio > 0 ? '#94a3b8' : '#f87171'} />
+              <InfoRow label="Sortino Ratio" value={varData.sortino_ratio.toFixed(4)} valueColor={varData.sortino_ratio > 1 ? '#34d399' : varData.sortino_ratio > 0 ? '#94a3b8' : '#f87171'} />
+              <InfoRow label="Worst Single Trade" value={`-$${Number(varData.max_observed_loss).toFixed(4)}`} valueColor="#f87171" />
             </div>
           </div>
         ) : (
