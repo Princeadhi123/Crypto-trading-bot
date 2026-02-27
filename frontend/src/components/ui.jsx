@@ -2,12 +2,12 @@ import React from 'react'
 import { RefreshCw, TrendingUp, TrendingDown, Minus } from 'lucide-react'
 
 // ─── Formatters ────────────────────────────────────────────────
-export function fmtCurrency(value, decimals = 6) {
+export function fmtCurrency(value, decimals = 4) {
   if (value === null || value === undefined) return '—'
   const abs = Math.abs(value)
-  if (abs >= 1_000_000) return `$${(value / 1_000_000).toFixed(6)}M`
+  if (abs >= 1_000_000) return `$${(value / 1_000_000).toFixed(4)}M`
   if (abs >= 1_000) return `$${value.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals })}`
-  return `$${value.toFixed(6)}`
+  return `$${value.toFixed(4)}`
 }
 
 export function fmtPct(value, decimals = 4) {
