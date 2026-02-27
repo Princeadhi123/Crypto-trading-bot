@@ -2,15 +2,15 @@ import React from 'react'
 import { RefreshCw, TrendingUp, TrendingDown, Minus } from 'lucide-react'
 
 // ─── Formatters ────────────────────────────────────────────────
-export function fmtCurrency(value, decimals = 2) {
+export function fmtCurrency(value, decimals = 6) {
   if (value === null || value === undefined) return '—'
   const abs = Math.abs(value)
-  if (abs >= 1_000_000) return `$${(value / 1_000_000).toFixed(2)}M`
+  if (abs >= 1_000_000) return `$${(value / 1_000_000).toFixed(6)}M`
   if (abs >= 1_000) return `$${value.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals })}`
-  return `$${value.toFixed(abs < 1 ? 4 : decimals)}`
+  return `$${value.toFixed(6)}`
 }
 
-export function fmtPct(value, decimals = 2) {
+export function fmtPct(value, decimals = 4) {
   if (value === null || value === undefined) return '—'
   const sign = value >= 0 ? '+' : ''
   return `${sign}${value.toFixed(decimals)}%`
@@ -18,7 +18,7 @@ export function fmtPct(value, decimals = 2) {
 
 export function fmtPrice(value) {
   if (!value) return '—'
-  if (value >= 10000) return `$${value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+  if (value >= 10000) return `$${value.toLocaleString('en-US', { minimumFractionDigits: 4, maximumFractionDigits: 4 })}`
   if (value >= 1) return `$${value.toFixed(4)}`
   return `$${value.toFixed(6)}`
 }
@@ -37,7 +37,7 @@ export function PnlText({ value, showSign = true, prefix = '$', suffix = '', cla
   const sign = showSign ? (isPos ? '+' : '') : ''
   return (
     <span className={`${cls} ${className}`}>
-      {sign}{prefix}{Math.abs(value).toFixed(2)}{suffix}
+      {sign}{prefix}{Math.abs(value).toFixed(4)}{suffix}
     </span>
   )
 }

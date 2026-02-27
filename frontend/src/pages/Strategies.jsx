@@ -185,7 +185,7 @@ export default function Strategies({ wsEvents }) {
                 <Tooltip
                   contentStyle={{ backgroundColor: '#141e35', border: '1px solid rgba(100,116,139,0.3)', borderRadius: 8 }}
                   labelStyle={{ color: '#cbd5e1' }}
-                  formatter={(value) => [`$${value.toFixed(2)}`, 'Total P&L']}
+                  formatter={(value) => [`$${value.toFixed(4)}`, 'Total P&L']}
                 />
                 <Bar dataKey="total_pnl" fill="#22c55e" radius={[0, 4, 4, 0]} />
               </BarChart>
@@ -197,7 +197,7 @@ export default function Strategies({ wsEvents }) {
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-sm font-semibold text-slate-200">{perf.strategy}</span>
                     <span className={`text-sm font-bold ${perf.total_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {perf.total_pnl >= 0 ? '+' : ''}${perf.total_pnl.toFixed(2)}
+                      {perf.total_pnl >= 0 ? '+' : ''}${perf.total_pnl.toFixed(4)}
                     </span>
                   </div>
                   <div className="flex gap-4 text-xs text-slate-400">
@@ -270,14 +270,14 @@ export default function Strategies({ wsEvents }) {
                         </span>
                       </td>
                       <td style={{ padding: '12px 16px', fontSize: '13px', textAlign: 'right', width: '130px' }}>
-                        <span className="font-mono text-blue-300">{p.kelly_fraction.toFixed(2)}%</span>
+                        <span className="font-mono text-blue-300">{p.kelly_fraction.toFixed(4)}%</span>
                       </td>
                       <td style={{ padding: '12px 16px', fontSize: '13px', textAlign: 'right', width: '200px' }}>
                         <div className="flex items-center justify-end gap-2">
                           <div className="h-1.5 rounded-full w-16 overflow-hidden" style={{ backgroundColor: 'rgba(100,116,139,0.2)' }}>
                             <div className="h-full rounded-full" style={{ width: `${Math.min(p.dynamic_weight / 2 * 100, 100)}%`, backgroundColor: p.dynamic_weight >= 1.0 ? '#22c55e' : '#f59e0b' }} />
                           </div>
-                          <span className={`font-mono text-xs ${p.dynamic_weight >= 1.0 ? 'text-emerald-400' : 'text-yellow-400'}`}>{p.dynamic_weight.toFixed(2)}x</span>
+                          <span className={`font-mono text-xs ${p.dynamic_weight >= 1.0 ? 'text-emerald-400' : 'text-yellow-400'}`}>{p.dynamic_weight.toFixed(4)}x</span>
                         </div>
                       </td>
                       <td style={{ padding: '12px 16px', fontSize: '13px', textAlign: 'right', width: '100px' }}>

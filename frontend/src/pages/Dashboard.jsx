@@ -82,6 +82,7 @@ export default function Dashboard({ wsEvents }) {
       if (latest.data.portfolio_value !== undefined) {
         setPortfolio(prev => prev ? {
           ...prev,
+          total_equity: latest.data.portfolio_value,
           total_balance: latest.data.portfolio_value,
           available_balance: latest.data.available_balance,
           unrealized_pnl: latest.data.unrealized_pnl

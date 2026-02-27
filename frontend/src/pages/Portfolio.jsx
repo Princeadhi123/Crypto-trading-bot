@@ -114,7 +114,7 @@ export default function Portfolio({ wsEvents }) {
                 <CartesianGrid strokeDasharray="2 4" stroke="rgba(255,255,255,0.04)" />
                 <XAxis dataKey="date" tick={{ fontSize: 10, fill: 'var(--text-muted)' }} tickFormatter={v => v.split(' ')[0]} axisLine={false} tickLine={false} />
                 <YAxis tick={{ fontSize: 10, fill: 'var(--text-muted)' }} tickFormatter={v => `$${v}`} axisLine={false} tickLine={false} width={52} />
-                <Tooltip content={<ChartTooltip formatter={v => [`$${Number(v).toFixed(2)}`, 'Cumulative P&L']} />} />
+                <Tooltip content={<ChartTooltip formatter={v => [`$${Number(v).toFixed(4)}`, 'Cumulative P&L']} />} />
                 <Line type="monotone" dataKey="cumulative_pnl" stroke="#10b981" strokeWidth={2} dot={false} activeDot={{ r: 4, fill: '#10b981', strokeWidth: 0 }} />
               </LineChart>
             </ResponsiveContainer>
@@ -132,7 +132,7 @@ export default function Portfolio({ wsEvents }) {
           <div className="divider" />
           <div className="space-y-0.5">
             <InfoRow label="Unrealized P&L" value={fmtCurrency(unrealizedPnl)} valueColor={unrealizedPnl >= 0 ? '#34d399' : '#f87171'} />
-            <InfoRow label="Profit Factor" value={`${(portfolio?.profit_factor || 0).toFixed(2)}×`} valueColor="#60a5fa" />
+            <InfoRow label="Profit Factor" value={`${(portfolio?.profit_factor || 0).toFixed(4)}×`} valueColor="#60a5fa" />
             <InfoRow label="Total Trades" value={portfolio?.total_trades || 0} />
             <InfoRow label="Wins / Losses" value={`${portfolio?.winning_trades || 0} / ${portfolio?.losing_trades || 0}`} />
             <InfoRow label="Max Drawdown" value={fmtCurrency(portfolio?.max_drawdown)} valueColor="#f59e0b" />

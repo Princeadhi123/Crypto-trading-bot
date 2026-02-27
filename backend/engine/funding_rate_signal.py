@@ -31,6 +31,9 @@ PERPETUAL_SYMBOL_MAP = {
     "BNB/USDT": "BNB/USDT:USDT",
     "SOL/USDT": "SOL/USDT:USDT",
     "AVAX/USDT": "AVAX/USDT:USDT",
+    "DOGE/USDT": "DOGE/USDT:USDT",
+    "XRP/USDT": "XRP/USDT:USDT",
+    "MATIC/USDT": "MATIC/USDT:USDT",
 }
 
 SIMULATED_FUNDING_RATES = {
@@ -79,14 +82,22 @@ class FundingRateSignal:
     MODERATE_FUNDING_THRESHOLD = 0.0003  # 0.03% per 8h
     NEUTRAL_THRESHOLD = 0.0001           # 0.01% per 8h
 
-    def __init__(self, exchange: Optional[ccxt.Exchange] = None):
+    def __init__(self, exchange: Optional[ccxt.Exchange] = None, cache_ttl_minutes: int = 5):
         self._exchange = exchange
         self._cache: dict[str, FundingRateReading] = {}
+        self._cache_ttl_seconds = cache_ttl_minutes * 60
 
     def set_exchange(self, exchange: Optional[ccxt.Exchange]):
         self._exchange = exchange
 
     async def get_funding_rate(self, spot_symbol: str) -> FundingRateReading:
+        # Check if we have a recent cached value (funding rates update every 8h, so 5min cache is safe)
+        if spot_symbol in self._cache:
+            cached = self._cache[spot_symbol]
+            age_seconds = (datetime.utcnow() - cached.timestamp).total_seconds()
+            if age_seconds < self._cache_ttl_seconds:
+                return cached
+        
         perp_symbol = PERPETUAL_SYMBOL_MAP.get(spot_symbol)
         is_simulated = True
 
