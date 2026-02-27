@@ -16,12 +16,38 @@ export default function Dashboard({ wsEvents }) {
   const [portfolio, setPortfolio] = useState(null)
   const [positions, setPositions] = useState([])
   const [prices, setPrices] = useState({})
-  const [prevPrices, setPrevPrices] = useState({})
+  const [priceTrends, setPriceTrends] = useState({})
   const [pnlChart, setPnlChart] = useState([])
   const [recentSignals, setRecentSignals] = useState([])
   const [loading, setLoading] = useState(false)
   const [botActionLoading, setBotActionLoading] = useState(false)
   const [closingPosition, setClosingPosition] = useState(null)
+
+  const applyPriceUpdate = useCallback((incomingPrices = {}) => {
+    setPrices(prevPrices => {
+      const prevEntries = prevPrices || {}
+      setPriceTrends(prevTrends => {
+        const nextTrends = { ...prevTrends }
+        Object.entries(incomingPrices).forEach(([symbol, rawPrice]) => {
+          const prevPrice = Number(prevEntries[symbol])
+          const nextPrice = Number(rawPrice)
+          if (!prevPrice && prevPrice !== 0) {
+            if (!(symbol in nextTrends)) nextTrends[symbol] = 'flat'
+            return
+          }
+          if (nextPrice > prevPrice) {
+            nextTrends[symbol] = 'up'
+          } else if (nextPrice < prevPrice) {
+            nextTrends[symbol] = 'down'
+          } else {
+            nextTrends[symbol] = nextTrends[symbol] || 'flat'
+          }
+        })
+        return nextTrends
+      })
+      return incomingPrices
+    })
+  }, [])
 
   const fetchAll = useCallback(async () => {
     try {
@@ -36,13 +62,13 @@ export default function Dashboard({ wsEvents }) {
       setStatus(statusRes.data)
       setPortfolio(portfolioRes.data)
       setPositions(positionsRes.data)
-      setPrices(pricesRes.data)
+      applyPriceUpdate(pricesRes.data)
       setRecentSignals(signalsRes.data)
       setPnlChart(chartRes.data)
     } catch (e) {
       console.error('Dashboard fetch error:', e)
     }
-  }, [])
+  }, [applyPriceUpdate])
 
   useEffect(() => {
     setLoading(true)
@@ -57,8 +83,7 @@ export default function Dashboard({ wsEvents }) {
     if (latest.event === 'price_update') {
       const newPrices = latest.data.prices || {}
       flushSync(() => {
-        setPrevPrices(prices)
-        setPrices(newPrices)
+        applyPriceUpdate(newPrices)
         
         if (latest.data.portfolio_value !== undefined) {
           setPortfolio(prev => prev ? {
@@ -93,7 +118,7 @@ export default function Dashboard({ wsEvents }) {
     } else if (latest.event === 'new_trade' || latest.event === 'trade_closed') {
       fetchAll()
     }
-  }, [wsEvents, fetchAll])
+  }, [wsEvents, fetchAll, applyPriceUpdate])
 
   const toggleBot = async () => {
     setBotActionLoading(true)
@@ -290,12 +315,13 @@ export default function Dashboard({ wsEvents }) {
           </h2>
           <div className="space-y-0">
             {Object.entries(prices).slice(0, 6).map(([symbol, price]) => {
-              const prevPrice = prevPrices[symbol]
+              const trend = priceTrends[symbol]
               const priceNum = Number(price)
-              const prevPriceNum = Number(prevPrice)
-              const isUp = prevPrice && priceNum > prevPriceNum
-              const isDown = prevPrice && priceNum < prevPriceNum
-              const priceColor = isUp ? '#10b981' : isDown ? '#ef4444' : 'var(--text-primary)'
+              const priceColor = trend === 'up'
+                ? '#10b981'
+                : trend === 'down'
+                  ? '#ef4444'
+                  : 'var(--text-primary)'
               
               return (
                 <div
