@@ -48,13 +48,17 @@ class RiskManager:
         max_concurrent_positions: int = 5,
         min_signal_confidence: float = 0.45,
         volatility_target_atr_percent: float = 1.5,
+        drawdown_pause_minutes: int = 60,
     ):
         self.max_portfolio_risk_percent = max_portfolio_risk_percent
         self.max_drawdown_percent = max_drawdown_percent
         self.max_concurrent_positions = max_concurrent_positions
         self.min_signal_confidence = min_signal_confidence
         self.volatility_target_atr_percent = volatility_target_atr_percent
+        self.drawdown_pause_minutes = drawdown_pause_minutes
         self.peak_portfolio_value: float = 0.0
+        self.circuit_breaker_triggered_at: float = 0.0
+        self.circuit_breaker_cooldown_end: float = 0.0
 
     def update_peak_portfolio_value(self, current_portfolio_value: float):
         if current_portfolio_value > self.peak_portfolio_value:
@@ -66,14 +70,38 @@ class RiskManager:
         return ((self.peak_portfolio_value - current_portfolio_value) / self.peak_portfolio_value) * 100
 
     def is_drawdown_circuit_breaker_triggered(self, current_portfolio_value: float) -> bool:
+        import time
+        current_time = time.time()
         current_drawdown = self.compute_current_drawdown_percent(current_portfolio_value)
-        if current_drawdown >= self.max_drawdown_percent:
-            logger.warning(
-                "Drawdown circuit breaker triggered: %.2f%% drawdown (max: %.2f%%)",
-                current_drawdown,
-                self.max_drawdown_percent,
-            )
+        
+        # Check if we're in a cooldown period after circuit breaker
+        if self.circuit_breaker_cooldown_end > 0 and current_time < self.circuit_breaker_cooldown_end:
+            remaining = (self.circuit_breaker_cooldown_end - current_time) / 60
+            logger.info("Drawdown circuit breaker cooling down: %.1f minutes remaining", remaining)
             return True
+        
+        if current_drawdown >= self.max_drawdown_percent:
+            # First trigger - start cooldown timer
+            if self.circuit_breaker_triggered_at == 0:
+                self.circuit_breaker_triggered_at = current_time
+                self.circuit_breaker_cooldown_end = current_time + (self.drawdown_pause_minutes * 60)
+                logger.warning(
+                    "Drawdown circuit breaker triggered: %.2f%% drawdown (max: %.2f%%). Pausing for %d minutes.",
+                    current_drawdown,
+                    self.max_drawdown_percent,
+                    self.drawdown_pause_minutes,
+                )
+            return True
+        
+        # After cooldown period, reset circuit breaker and allow trading to recover
+        if self.circuit_breaker_triggered_at > 0:
+            logger.info("Drawdown cooldown complete (%.2f%% drawdown). Resetting circuit breaker to allow recovery trading.", current_drawdown)
+            self.circuit_breaker_triggered_at = 0.0
+            self.circuit_breaker_cooldown_end = 0.0
+            # Reset peak to current value - this is the "High-Water Mark Reset"
+            # Now drawdown is 0% and bot can trade to recover
+            self.peak_portfolio_value = current_portfolio_value
+        
         return False
 
     def _compute_anti_martingale_scale(self, current_portfolio_value: float) -> float:
