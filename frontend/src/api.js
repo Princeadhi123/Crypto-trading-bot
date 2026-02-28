@@ -9,6 +9,7 @@ export const botApi = {
   getStatus: () => apiClient.get('/status'),
   startBot: () => apiClient.post('/bot/start'),
   stopBot: () => apiClient.post('/bot/stop'),
+  resetDrawdown: () => apiClient.post('/bot/reset-drawdown'),
   getSettings: () => apiClient.get('/settings'),
   updateSettings: (settings) => apiClient.put('/settings', settings),
   getPortfolio: () => apiClient.get('/portfolio'),

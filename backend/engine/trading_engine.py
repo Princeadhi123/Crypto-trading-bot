@@ -1246,6 +1246,7 @@ class TradingEngine:
             "trades_today": self.total_trades_today,
             "uptime_seconds": time.time() - self.start_time if self.is_running else 0,
             "last_tick": self.last_tick.isoformat() if self.last_tick else None,
+            "circuit_breaker_active": self.risk_manager.circuit_breaker_active if self.risk_manager else False,
         }
 
     def get_portfolio_stats(self) -> dict:

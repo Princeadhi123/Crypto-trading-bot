@@ -22,6 +22,7 @@ export default function Dashboard({ wsEvents }) {
   const [loading, setLoading] = useState(false)
   const [botActionLoading, setBotActionLoading] = useState(false)
   const [closingPosition, setClosingPosition] = useState(null)
+  const [resettingDrawdown, setResettingDrawdown] = useState(false)
 
   const applyPriceUpdate = useCallback((incomingPrices = {}) => {
     setPrices(prevPrices => {
@@ -136,6 +137,27 @@ export default function Dashboard({ wsEvents }) {
     }
   }
 
+  const handleResetDrawdown = async () => {
+    if (!window.confirm(
+      '⚠️ Reset Circuit Breaker?\n\n' +
+      'This will acknowledge the realized loss and reset the high-water mark to your current balance. ' +
+      'Trading will resume immediately.\n\n' +
+      'Are you sure you want to continue?'
+    )) {
+      return
+    }
+    setResettingDrawdown(true)
+    try {
+      await botApi.resetDrawdown()
+      await fetchAll()
+    } catch (e) {
+      console.error('Reset drawdown error:', e)
+      alert(`Failed to reset circuit breaker: ${e.response?.data?.detail || e.message}`)
+    } finally {
+      setResettingDrawdown(false)
+    }
+  }
+
   const handleClosePosition = async (symbol) => {
     if (!window.confirm(`Close position ${symbol} at current market price?`)) {
       return
@@ -209,6 +231,39 @@ export default function Dashboard({ wsEvents }) {
           </button>
         </div>
       </div>
+
+      {/* ── Circuit breaker warning ─────────────────────────────── */}
+      {status?.circuit_breaker_active && (
+        <div
+          className="flex items-center justify-between px-4 py-3 rounded-xl text-[12px]"
+          style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)' }}
+        >
+          <div className="flex items-center gap-3">
+            <AlertTriangle size={16} style={{ color: '#ef4444', flexShrink: 0 }} />
+            <div>
+              <div style={{ color: '#fca5a5', fontWeight: 600, marginBottom: 2 }}>
+                🚨 Circuit Breaker Triggered: Max Drawdown Exceeded
+              </div>
+              <div style={{ color: '#fecaca', fontSize: 11 }}>
+                Trading is suspended to protect your capital. Review market conditions before resuming.
+              </div>
+            </div>
+          </div>
+          <button
+            onClick={handleResetDrawdown}
+            disabled={resettingDrawdown}
+            className="px-4 py-2 rounded-lg text-[12px] font-semibold transition-all"
+            style={{
+              background: '#dc2626',
+              color: 'white',
+              opacity: resettingDrawdown ? 0.5 : 1,
+              cursor: resettingDrawdown ? 'not-allowed' : 'pointer',
+            }}
+          >
+            {resettingDrawdown ? 'Resetting...' : 'Acknowledge Loss & Resume Trading'}
+          </button>
+        </div>
+      )}
 
       {/* ── Paper trading notice ────────────────────────────────── */}
       {status?.paper_trading && (

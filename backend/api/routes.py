@@ -122,6 +122,37 @@ async def stop_bot(session: AsyncSession = Depends(get_db_session)):
     return {"message": "Bot stopped"}
 
 
+@router.post("/bot/reset-drawdown")
+async def reset_drawdown_circuit_breaker():
+    """
+    Manual reset of drawdown circuit breaker.
+    Performs High-Water Mark Reset: resets peak to current portfolio value,
+    setting drawdown to 0% and allowing trading to resume.
+    """
+    if not trading_engine.is_running:
+        raise HTTPException(status_code=400, detail="Bot is not running")
+    
+    if not trading_engine.risk_manager:
+        raise HTTPException(status_code=400, detail="Risk manager not initialized")
+    
+    if not trading_engine.risk_manager.circuit_breaker_active:
+        raise HTTPException(status_code=400, detail="Circuit breaker is not active")
+    
+    current_portfolio_value = trading_engine._compute_portfolio_value()
+    old_peak = trading_engine.risk_manager.peak_portfolio_value
+    current_drawdown = trading_engine.risk_manager.compute_current_drawdown_percent(current_portfolio_value)
+    
+    trading_engine.risk_manager.reset_circuit_breaker(current_portfolio_value)
+    
+    return {
+        "message": "Circuit breaker reset successfully",
+        "old_peak": round(old_peak, 2),
+        "new_peak": round(current_portfolio_value, 2),
+        "drawdown_before_reset": round(current_drawdown, 2),
+        "drawdown_after_reset": 0.0,
+    }
+
+
 @router.get("/portfolio")
 async def get_portfolio(session: AsyncSession = Depends(get_db_session)):
     stats = trading_engine.get_portfolio_stats()
