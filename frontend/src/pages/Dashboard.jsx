@@ -4,6 +4,7 @@ import {
   Activity, DollarSign, Target, AlertTriangle,
   Play, Square, Zap, TrendingUp, TrendingDown, BarChart2, X
 } from 'lucide-react'
+import { RefreshCw } from 'lucide-react'
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 import { botApi } from '../api'
 import {
@@ -200,6 +201,12 @@ export default function Dashboard({ wsEvents }) {
     }
   }
 
+  const handleRefresh = async () => {
+    setLoading(true)
+    await fetchAll()
+    setLoading(false)
+  }
+
   const isRunning = status?.is_running
   const pnl = portfolio?.realized_pnl || 0
   const pnlPositive = pnl >= 0
@@ -230,8 +237,8 @@ export default function Dashboard({ wsEvents }) {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <button className="btn-ghost" onClick={fetchAll}>
-            <Activity size={13} className={loading ? 'animate-spin' : ''} />
+          <button className="btn-ghost" onClick={handleRefresh} disabled={loading} title={loading ? 'Refreshing…' : 'Refresh'}>
+            <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
             Refresh
           </button>
           <button
@@ -300,6 +307,13 @@ export default function Dashboard({ wsEvents }) {
           accentColor="#10b981"
         />
         <StatCard
+          title="Unrealized P&L"
+          value={`${unrealizedPositive ? '+' : ''}${fmtCurrency(unrealizedPnl, 4)}`}
+          subtitle={unrealizedPositive ? 'Open profit' : 'Open loss'}
+          icon={unrealizedPositive ? TrendingUp : TrendingDown}
+          accentColor={unrealizedPositive ? '#10b981' : '#ef4444'}
+        />
+        <StatCard
           title="Realized P&L"
           value={`${pnlPositive ? '+' : ''}${fmtCurrency(pnl, 4)}`}
           subtitle={`Win rate: ${winRate.toFixed(1)}%`}
@@ -314,18 +328,39 @@ export default function Dashboard({ wsEvents }) {
           accentColor="#3b82f6"
         />
         <StatCard
-          title="Unrealized P&L"
-          value={`${unrealizedPositive ? '+' : ''}${fmtCurrency(unrealizedPnl, 4)}`}
-          subtitle={unrealizedPositive ? 'Open profit' : 'Open loss'}
-          icon={unrealizedPositive ? TrendingUp : TrendingDown}
-          accentColor={unrealizedPositive ? '#10b981' : '#ef4444'}
-        />
-        <StatCard
           title="Win Rate"
           value={`${winRate.toFixed(1)}%`}
           subtitle={`${portfolio?.winning_trades || 0}W / ${portfolio?.losing_trades || 0}L`}
           icon={Target}
           accentColor={winRate >= 50 ? '#10b981' : '#ef4444'}
+        />
+      </div>
+
+      {/* ── Secondary stats row ─────────────────────────────────── */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <StatCard
+          title="Total Trades"
+          value={fmtNumber(portfolio?.total_trades)}
+          icon={Activity}
+          accentColor="#3b82f6"
+        />
+        <StatCard
+          title="Daily P&L"
+          value={`${(portfolio?.daily_pnl || 0) >= 0 ? '+' : ''}${fmtCurrency(portfolio?.daily_pnl)}`}
+          icon={(portfolio?.daily_pnl || 0) >= 0 ? TrendingUp : TrendingDown}
+          accentColor={(portfolio?.daily_pnl || 0) >= 0 ? '#10b981' : '#ef4444'}
+        />
+        <StatCard
+          title="Profit Factor"
+          value={`${(portfolio?.profit_factor || 0).toFixed(2)}×`}
+          icon={Target}
+          accentColor="#8b5cf6"
+        />
+        <StatCard
+          title="Max Drawdown"
+          value={fmtCurrency(portfolio?.max_drawdown, 4)}
+          icon={AlertTriangle}
+          accentColor="#f59e0b"
         />
       </div>
 
@@ -558,33 +593,6 @@ export default function Dashboard({ wsEvents }) {
         </div>
       </div>
 
-      {/* ── Bottom stats ────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard
-          title="Total Trades"
-          value={fmtNumber(portfolio?.total_trades)}
-          icon={Activity}
-          accentColor="#3b82f6"
-        />
-        <StatCard
-          title="Daily P&L"
-          value={`${(portfolio?.daily_pnl || 0) >= 0 ? '+' : ''}${fmtCurrency(portfolio?.daily_pnl)}`}
-          icon={(portfolio?.daily_pnl || 0) >= 0 ? TrendingUp : TrendingDown}
-          accentColor={(portfolio?.daily_pnl || 0) >= 0 ? '#10b981' : '#ef4444'}
-        />
-        <StatCard
-          title="Profit Factor"
-          value={`${(portfolio?.profit_factor || 0).toFixed(2)}×`}
-          icon={Target}
-          accentColor="#8b5cf6"
-        />
-        <StatCard
-          title="Max Drawdown"
-          value={fmtCurrency(portfolio?.max_drawdown, 4)}
-          icon={AlertTriangle}
-          accentColor="#f59e0b"
-        />
-      </div>
     </div>
   )
 }

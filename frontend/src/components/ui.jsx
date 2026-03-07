@@ -66,7 +66,7 @@ export function PageHeader({ title, subtitle, actions, onRefresh, loading }) {
       <div className="flex items-center gap-2 flex-shrink-0">
         {actions}
         {onRefresh && (
-          <button className="btn-ghost" onClick={onRefresh}>
+          <button className="btn-ghost" onClick={onRefresh} disabled={loading} title={loading ? 'Refreshing…' : 'Refresh'}>
             <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
           </button>
         )}

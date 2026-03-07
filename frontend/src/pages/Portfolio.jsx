@@ -95,13 +95,17 @@ export default function Portfolio({ wsEvents }) {
   const drawdownColor = drawdown < 5 ? '#10b981' : drawdown < 10 ? '#f59e0b' : '#ef4444'
 
   const pieData = strategyPerf.filter(s => s.total_trades > 0).map(s => ({ name: s.strategy, value: s.total_trades }))
+  const handleRefresh = async () => {
+    setLoading(true)
+    await fetchData()
+  }
 
   return (
     <div className="p-6 space-y-5 animate-fade-in">
       <PageHeader
         title="Portfolio"
         subtitle="Performance analytics and risk metrics"
-        onRefresh={fetchData}
+        onRefresh={handleRefresh}
         loading={loading}
       />
 

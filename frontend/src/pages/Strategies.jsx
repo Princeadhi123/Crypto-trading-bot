@@ -64,6 +64,7 @@ export default function Strategies({ wsEvents }) {
   const [livePerf, setLivePerf] = useState([])
   const [regimeInfo, setRegimeInfo] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false)
 
   const fetchData = async () => {
     try {
@@ -80,6 +81,7 @@ export default function Strategies({ wsEvents }) {
     } catch (e) {
       console.error(e)
     } finally {
+      setHasLoadedOnce(true)
       setLoading(false)
     }
   }
@@ -110,7 +112,12 @@ export default function Strategies({ wsEvents }) {
     }
   }
 
-  if (loading) {
+  const handleRefresh = async () => {
+    setLoading(true)
+    await fetchData()
+  }
+
+  if (loading && !hasLoadedOnce) {
     return (
       <div className="p-6 space-y-5">
         <div className="h-8 skeleton" style={{ width: 200 }} />
@@ -126,7 +133,7 @@ export default function Strategies({ wsEvents }) {
       <PageHeader
         title="Strategies"
         subtitle="Configure and monitor your active trading algorithms"
-        onRefresh={fetchData}
+        onRefresh={handleRefresh}
         loading={loading}
       />
 

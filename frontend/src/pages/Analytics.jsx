@@ -18,6 +18,7 @@ export default function Analytics({ wsEvents }) {
   const [varData, setVarData] = useState(null)
   const [fundingRates, setFundingRates] = useState([])
   const [loading, setLoading] = useState(true)
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false)
 
   const fetchVarOnly = async () => {
     try {
@@ -41,6 +42,7 @@ export default function Analytics({ wsEvents }) {
     } catch (e) {
       console.error(e)
     } finally {
+      setHasLoadedOnce(true)
       setLoading(false)
     }
   }
@@ -63,13 +65,29 @@ export default function Analytics({ wsEvents }) {
   }, [wsEvents])
 
   const sentimentStyle = SENTIMENT_COLORS[sentiment?.classification] || SENTIMENT_COLORS['Neutral']
+  const handleRefresh = async () => {
+    setLoading(true)
+    await fetchAll()
+  }
+
+  if (loading && !hasLoadedOnce) {
+    return (
+      <div className="p-6 space-y-5">
+        <div className="h-8 skeleton" style={{ width: 260 }} />
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="card skeleton" style={{ height: 220 }} />
+          <div className="card skeleton" style={{ height: 220 }} />
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="p-6 space-y-5 animate-fade-in">
       <PageHeader
         title="Institutional Analytics"
         subtitle="VaR, sentiment, funding rates — what hedge funds monitor"
-        onRefresh={fetchAll}
+        onRefresh={handleRefresh}
         loading={loading}
       />
 
