@@ -1031,6 +1031,7 @@ class TradingEngine:
                     "portfolio_value": portfolio_value,
                     "available_balance": self.paper_balance,
                     "unrealized_pnl": sum(p.unrealized_pnl for p in self.active_positions.values()),
+                    "active_positions_count": len(self.active_positions),
                     "regimes": self.current_regimes,
                     "hft_mode": self.hft_mode,
                 })

@@ -64,13 +64,23 @@ export default function Portfolio({ wsEvents }) {
     const latest = wsEvents?.[0]
     if (!latest) return
     if (latest.event === 'price_update' && latest.data.portfolio_value !== undefined) {
-      setPortfolio(prev => prev ? {
-        ...prev,
-        total_equity: latest.data.portfolio_value,
-        total_balance: latest.data.portfolio_value,
-        available_balance: latest.data.available_balance,
-        unrealized_pnl: latest.data.unrealized_pnl
-      } : prev)
+      setPortfolio(prev => {
+        if (!prev) return prev
+        if ((latest.data.active_positions_count ?? 0) === 0) {
+          return {
+            ...prev,
+            available_balance: latest.data.available_balance,
+            unrealized_pnl: 0,
+          }
+        }
+        return {
+          ...prev,
+          total_equity: latest.data.portfolio_value,
+          total_balance: latest.data.portfolio_value,
+          available_balance: latest.data.available_balance,
+          unrealized_pnl: latest.data.unrealized_pnl
+        }
+      })
     } else if (latest.event === 'new_trade' || latest.event === 'trade_closed') {
       fetchData()
     }
