@@ -1,5 +1,7 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
 
+const _wsToken = import.meta.env.VITE_API_TOKEN || ''
+
 export function useWebSocket(onMessage) {
   const socketRef = useRef(null)
   const [isConnected, setIsConnected] = useState(false)
@@ -13,7 +15,8 @@ export function useWebSocket(onMessage) {
     // Use the same host/protocol as the page — routes through Vite proxy in dev,
     // works correctly in any deployed environment without hardcoding a port.
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const wsUrl = `${protocol}//${window.location.host}/ws`
+    const baseUrl = `${protocol}//${window.location.host}/ws`
+    const wsUrl = _wsToken ? `${baseUrl}?token=${encodeURIComponent(_wsToken)}` : baseUrl
     const socket = new WebSocket(wsUrl)
     socketRef.current = socket
 

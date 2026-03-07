@@ -1,8 +1,19 @@
 import axios from 'axios'
 
+// Read optional API token from frontend env (must match backend API_SECRET_TOKEN)
+const _apiToken = import.meta.env.VITE_API_TOKEN || ''
+
 const apiClient = axios.create({
   baseURL: '/api',
   timeout: 10000,
+})
+
+// Attach Bearer token to every request when configured
+apiClient.interceptors.request.use((config) => {
+  if (_apiToken) {
+    config.headers['Authorization'] = `Bearer ${_apiToken}`
+  }
+  return config
 })
 
 export const botApi = {

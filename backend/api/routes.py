@@ -1,16 +1,17 @@
 import logging
 from datetime import datetime, timedelta
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, desc, and_, Integer, case
 
 from models.database import get_db_session, TradeRecord, BotSettings
 from models.schemas import BotSettingsSchema, TradeRecordSchema
 from engine.trading_engine import trading_engine, STRATEGY_REGISTRY, HFT_STRATEGY_REGISTRY
+from api.auth import require_auth, rate_limit, validate_symbol, validate_status, validate_strategy_id
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_auth)])
 
 
 def _settings_row_to_dict(row: BotSettings) -> dict:
@@ -63,7 +64,8 @@ async def get_settings(session: AsyncSession = Depends(get_db_session)):
 
 
 @router.put("/settings")
-async def update_settings(payload: BotSettingsSchema, session: AsyncSession = Depends(get_db_session)):
+async def update_settings(request: Request, payload: BotSettingsSchema, session: AsyncSession = Depends(get_db_session)):
+    rate_limit(request, max_calls=10, window_secs=60)
     settings = await _get_or_create_settings(session)
     # Use in-memory balance if bot is running, otherwise use DB value
     old_paper_balance = trading_engine.paper_balance if (trading_engine.is_running and settings.paper_trading_enabled) else settings.paper_balance
@@ -102,7 +104,8 @@ async def update_settings(payload: BotSettingsSchema, session: AsyncSession = De
 
 
 @router.post("/bot/start")
-async def start_bot(session: AsyncSession = Depends(get_db_session)):
+async def start_bot(request: Request, session: AsyncSession = Depends(get_db_session)):
+    rate_limit(request, max_calls=5, window_secs=60)
     if trading_engine.is_running:
         raise HTTPException(status_code=400, detail="Bot is already running")
     settings = await _get_or_create_settings(session)
@@ -114,7 +117,8 @@ async def start_bot(session: AsyncSession = Depends(get_db_session)):
 
 
 @router.post("/bot/stop")
-async def stop_bot(session: AsyncSession = Depends(get_db_session)):
+async def stop_bot(request: Request, session: AsyncSession = Depends(get_db_session)):
+    rate_limit(request, max_calls=5, window_secs=60)
     await trading_engine.stop()
     settings = await _get_or_create_settings(session)
     settings.is_running = False
@@ -123,7 +127,8 @@ async def stop_bot(session: AsyncSession = Depends(get_db_session)):
 
 
 @router.post("/bot/reset-drawdown")
-async def reset_drawdown_circuit_breaker():
+async def reset_drawdown_circuit_breaker(request: Request):
+    rate_limit(request, max_calls=5, window_secs=60)
     """
     Manual reset of drawdown circuit breaker.
     Performs High-Water Mark Reset: resets peak to current portfolio value,
@@ -229,8 +234,10 @@ async def get_active_positions():
 
 
 @router.post("/positions/close")
-async def close_position_manually(symbol: str = Query(...)):
+async def close_position_manually(request: Request, symbol: str = Query(...)):
     """Manually close an open position at current market price"""
+    rate_limit(request, max_calls=20, window_secs=60)
+    symbol = validate_symbol(symbol)
     await trading_engine.close_position_by_symbol(symbol, reason="manual_close")
     return {"message": f"Position {symbol} closed successfully"}
 
@@ -239,13 +246,15 @@ async def close_position_manually(symbol: str = Query(...)):
 async def get_trade_history(
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
-    symbol: Optional[str] = Query(default=None),
+    symbol: Optional[str] = Query(default=None, max_length=20),
     status: Optional[str] = Query(default=None),
     session: AsyncSession = Depends(get_db_session),
 ):
+    status = validate_status(status)
     query = select(TradeRecord).order_by(desc(TradeRecord.opened_at))
     if symbol:
-        query = query.where(TradeRecord.symbol.ilike(f"%{symbol}%"))
+        safe_sym = symbol.upper().strip()[:20]
+        query = query.where(TradeRecord.symbol.ilike(f"%{safe_sym}%"))
     if status:
         query = query.where(TradeRecord.status == status)
     query = query.offset(offset).limit(limit)
@@ -256,13 +265,15 @@ async def get_trade_history(
 
 @router.get("/trades/count")
 async def get_trade_count(
-    symbol: Optional[str] = Query(default=None),
+    symbol: Optional[str] = Query(default=None, max_length=20),
     status: Optional[str] = Query(default=None),
     session: AsyncSession = Depends(get_db_session),
 ):
+    status = validate_status(status)
     query = select(func.count(TradeRecord.id))
     if symbol:
-        query = query.where(TradeRecord.symbol.ilike(f"%{symbol}%"))
+        safe_sym = symbol.upper().strip()[:20]
+        query = query.where(TradeRecord.symbol.ilike(f"%{safe_sym}%"))
     if status:
         query = query.where(TradeRecord.status == status)
     result = await session.execute(query)
@@ -293,7 +304,9 @@ async def get_strategies():
 
 
 @router.patch("/strategies/{strategy_id}/toggle")
-async def toggle_strategy(strategy_id: str):
+async def toggle_strategy(request: Request, strategy_id: str):
+    rate_limit(request, max_calls=20, window_secs=60)
+    validate_strategy_id(strategy_id)
     strategy = STRATEGY_REGISTRY.get(strategy_id)
     if strategy is None:
         raise HTTPException(status_code=404, detail=f"Strategy '{strategy_id}' not found")

@@ -1,6 +1,12 @@
-from pydantic import BaseModel, Field, field_serializer
+from pydantic import BaseModel, Field, field_serializer, field_validator
 from typing import Optional, List
 from datetime import datetime
+
+_ALLOWED_STRATEGIES = frozenset({"rsi", "macd", "bollinger", "scalping", "pairs"})
+_ALLOWED_SYMBOLS = frozenset({
+    "BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT",
+    "DOGE/USDT", "XRP/USDT", "AVAX/USDT", "MATIC/USDT",
+})
 
 
 class TradeRecordSchema(BaseModel):
@@ -36,7 +42,7 @@ class TradeRecordSchema(BaseModel):
 class BotSettingsSchema(BaseModel):
     is_running: bool = False
     paper_trading_enabled: bool = True
-    paper_balance: float = 10000.0
+    paper_balance: float = Field(default=10000.0, ge=1.0, le=10_000_000.0)
     max_portfolio_risk_percent: float = Field(default=2.0, ge=0.1, le=10.0)
     max_drawdown_percent: float = Field(default=10.0, ge=1.0, le=50.0)
     default_stop_loss_percent: float = Field(default=2.0, ge=0.5, le=20.0)
@@ -45,6 +51,22 @@ class BotSettingsSchema(BaseModel):
     active_strategies: List[str] = ["rsi", "macd", "bollinger", "scalping"]
     active_symbols: List[str] = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT"]
     hft_mode: bool = False
+
+    @field_validator("active_strategies")
+    @classmethod
+    def validate_strategies(cls, v: List[str]) -> List[str]:
+        invalid = [s for s in v if s not in _ALLOWED_STRATEGIES]
+        if invalid:
+            raise ValueError(f"Unknown strategies: {invalid}. Allowed: {sorted(_ALLOWED_STRATEGIES)}")
+        return v
+
+    @field_validator("active_symbols")
+    @classmethod
+    def validate_symbols(cls, v: List[str]) -> List[str]:
+        invalid = [s for s in v if s not in _ALLOWED_SYMBOLS]
+        if invalid:
+            raise ValueError(f"Unknown symbols: {invalid}. Allowed: {sorted(_ALLOWED_SYMBOLS)}")
+        return v
 
 
 class PortfolioStatsSchema(BaseModel):
