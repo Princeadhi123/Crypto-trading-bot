@@ -38,16 +38,42 @@ STRATEGY_REGISTRY = {
 
 # HFT-tuned registry: EMA 3/8, ATR stop 0.8x, target 1.5x — ultra-fast crossovers on 1m bars
 HFT_STRATEGY_REGISTRY = {
-    "rsi": RsiStrategy(rsi_period=9, oversold_threshold=25.0, overbought_threshold=75.0,
-                       stop_loss_percent=0.5, take_profit_percent=1.0),
-    "macd": MacdStrategy(fast_period=6, slow_period=13, signal_period=5,
-                         stop_loss_percent=0.6, take_profit_percent=1.2),
-    "bollinger": BollingerBandsStrategy(period=14, std_deviation=1.8,
-                                        stop_loss_percent=0.5, take_profit_percent=1.0),
-    "scalping": ScalpingStrategy(fast_ema_period=3, slow_ema_period=8, momentum_period=5,
-                                  atr_period=7, atr_stop_multiplier=0.8, atr_target_multiplier=1.5),
-    "pairs": StatisticalArbitrageStrategy(spread_lookback=30, zscore_entry_threshold=1.8,
-                                           stop_loss_percent=1.5, take_profit_percent=1.2),
+    # HFT mode: 1-minute candles — strict 70% WR filters, numerically tuned for 1m behaviour.
+    # Thresholds differ from standard (5m) only where 1m data requires calibration:
+    # RSI moves faster, EMA gaps are smaller, volume spikes are less pronounced on 1m.
+    # Quality bar is identical — only the numbers are adjusted for 1m scale.
+    "rsi": RsiStrategy(
+        rsi_period=9, oversold_threshold=25.0, overbought_threshold=75.0,
+        stop_loss_percent=0.5, take_profit_percent=1.0,
+        volume_multiplier=1.3,        # strict but slightly below 1.5 — 1m volume is noisier
+        rsi_acceleration_min=1.5,     # strict but below 2.0 — RSI accelerates faster on 1m
+        trend_filter_pct=1.5,         # wider trend band — 1m price swings more vs EMA
+    ),
+    "macd": MacdStrategy(
+        fast_period=6, slow_period=13, signal_period=5,
+        stop_loss_percent=0.6, take_profit_percent=1.2,
+        trend_ema_period=10,          # shorter trend EMA — 1m trends are shorter-lived
+    ),
+    "bollinger": BollingerBandsStrategy(
+        period=14, std_deviation=1.8,
+        stop_loss_percent=0.5, take_profit_percent=1.0,
+        min_rr_ratio=1.3,             # strict but below 1.5 — tighter 1m bands make 1.5 hard
+        rsi_oversold=35.0,            # same as standard — extreme oversold required
+        rsi_overbought=65.0,          # same as standard — extreme overbought required
+    ),
+    "scalping": ScalpingStrategy(
+        fast_ema_period=3, slow_ema_period=8, momentum_period=5,
+        atr_period=7, atr_stop_multiplier=0.8, atr_target_multiplier=1.5,
+        volume_multiplier=1.3,        # strict but below 1.5 — 1m volume spikes are smaller
+        min_momentum=0.0007,          # strict but below 0.001 — 1m momentum magnitude smaller
+        min_ema_gap_pct=0.0004,       # strict but below 0.0005 — shorter EMA periods = smaller gap
+        ema_trend_lookback=2,         # 2 candles on 1m ≈ 3 candles on 5m in trend confirmation
+    ),
+    "pairs": StatisticalArbitrageStrategy(
+        spread_lookback=30, zscore_entry_threshold=1.8,
+        stop_loss_percent=1.0, take_profit_percent=2.0,
+        min_correlation=0.65,         # same strict correlation gate as standard mode
+    ),
 }
 
 # Standard mode: 5m candles, 30s loop  |  HFT mode: 1m candles, 5s loop
@@ -1081,7 +1107,7 @@ class TradingEngine:
         )
         self.signal_ensemble = SignalEnsemble(
             minimum_agreement_count=1 if self.hft_mode else 2,
-            minimum_composite_confidence=0.35 if self.hft_mode else 0.45,
+            minimum_composite_confidence=0.45 if self.hft_mode else 0.55,
         )
         self.is_running = True
         self.start_time = time.time()

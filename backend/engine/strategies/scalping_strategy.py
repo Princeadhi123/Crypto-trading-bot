@@ -18,7 +18,11 @@ class ScalpingStrategy(BaseStrategy):
         momentum_period: int = 10,
         atr_period: int = 14,
         atr_stop_multiplier: float = 1.5,
-        atr_target_multiplier: float = 2.5,
+        atr_target_multiplier: float = 2.8125,
+        volume_multiplier: float = 1.5,
+        min_momentum: float = 0.001,
+        ema_trend_lookback: int = 3,
+        min_ema_gap_pct: float = 0.0005,
     ):
         super().__init__("EMA Scalping")
         self.fast_ema_period = fast_ema_period
@@ -27,6 +31,10 @@ class ScalpingStrategy(BaseStrategy):
         self.atr_period = atr_period
         self.atr_stop_multiplier = atr_stop_multiplier
         self.atr_target_multiplier = atr_target_multiplier
+        self.volume_multiplier = volume_multiplier
+        self.min_momentum = min_momentum
+        self.ema_trend_lookback = ema_trend_lookback
+        self.min_ema_gap_pct = min_ema_gap_pct
 
     def _compute_atr(self, highs: pd.Series, lows: pd.Series, closes: pd.Series) -> pd.Series:
         previous_closes = closes.shift(1)
@@ -64,12 +72,23 @@ class ScalpingStrategy(BaseStrategy):
 
         avg_volume = volumes.rolling(20).mean().iloc[-1]
         current_volume = volumes.iloc[-1]
-        volume_confirmation = current_volume > avg_volume
+        volume_confirmation = current_volume > avg_volume * self.volume_multiplier
+
+        slow_ema_prior = slow_ema.iloc[-(self.ema_trend_lookback + 1)]
 
         # Bullish EMA crossover with positive momentum and volume
         bullish_cross = previous_fast <= previous_slow and current_fast > current_slow
-        if bullish_cross and current_momentum > 0 and volume_confirmation:
-            signal_strength = min(abs(current_momentum) * 10 + 0.5, 1.0)
+        slow_ema_rising = current_slow > slow_ema_prior
+        price_above_slow = current_price > current_slow
+        ema_gap_pct = (current_fast - current_slow) / (current_slow + 1e-10)
+        ema_gap_confirmed = ema_gap_pct >= self.min_ema_gap_pct
+        if (bullish_cross
+                and current_momentum >= self.min_momentum
+                and volume_confirmation
+                and slow_ema_rising
+                and price_above_slow
+                and ema_gap_confirmed):
+            signal_strength = min(abs(current_momentum) * 20, 1.0)
             stop_loss = current_price - (self.atr_stop_multiplier * current_atr)
             take_profit = current_price + (self.atr_target_multiplier * current_atr)
             return TradingSignal(
@@ -91,8 +110,17 @@ class ScalpingStrategy(BaseStrategy):
 
         # Bearish EMA crossover with negative momentum and volume
         bearish_cross = previous_fast >= previous_slow and current_fast < current_slow
-        if bearish_cross and current_momentum < 0 and volume_confirmation:
-            signal_strength = min(abs(current_momentum) * 10 + 0.5, 1.0)
+        slow_ema_falling = current_slow < slow_ema_prior
+        price_below_slow = current_price < current_slow
+        ema_gap_pct_bear = (current_slow - current_fast) / (current_slow + 1e-10)
+        ema_gap_confirmed_bear = ema_gap_pct_bear >= self.min_ema_gap_pct
+        if (bearish_cross
+                and current_momentum <= -self.min_momentum
+                and volume_confirmation
+                and slow_ema_falling
+                and price_below_slow
+                and ema_gap_confirmed_bear):
+            signal_strength = min(abs(current_momentum) * 20, 1.0)
             stop_loss = current_price + (self.atr_stop_multiplier * current_atr)
             take_profit = current_price - (self.atr_target_multiplier * current_atr)
             return TradingSignal(
@@ -115,4 +143,4 @@ class ScalpingStrategy(BaseStrategy):
         return None
 
     def requires_minimum_candles(self) -> int:
-        return max(self.slow_ema_period, self.atr_period, self.momentum_period) * 2
+        return max(self.slow_ema_period, self.atr_period, self.momentum_period) * 2 + self.ema_trend_lookback

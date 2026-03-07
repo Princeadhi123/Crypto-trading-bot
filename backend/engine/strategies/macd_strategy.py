@@ -17,6 +17,7 @@ class MacdStrategy(BaseStrategy):
         signal_period: int = 9,
         stop_loss_percent: float = 2.5,
         take_profit_percent: float = 5.0,
+        trend_ema_period: int = 20,
     ):
         super().__init__("MACD Momentum")
         self.fast_period = fast_period
@@ -24,6 +25,7 @@ class MacdStrategy(BaseStrategy):
         self.signal_period = signal_period
         self.stop_loss_percent = stop_loss_percent
         self.take_profit_percent = take_profit_percent
+        self.trend_ema_period = trend_ema_period
 
     def _compute_macd(self, closes: pd.Series):
         ema_fast = closes.ewm(span=self.fast_period, adjust=False).mean()
@@ -47,12 +49,19 @@ class MacdStrategy(BaseStrategy):
         previous_signal = signal_line.iloc[-2]
         current_histogram = histogram.iloc[-1]
         previous_histogram = histogram.iloc[-2]
+        prior_histogram = histogram.iloc[-3]
 
-        # Bullish crossover: MACD crosses above signal line with rising histogram
+        trend_ema = closes.ewm(span=self.trend_ema_period, adjust=False).mean()
+        current_trend_ema = trend_ema.iloc[-1]
+
+        # Bullish crossover: MACD crosses above signal line
+        # 70% WR gate: zero-line + 2-candle histogram expansion + price above trend EMA
         bullish_crossover = previous_macd <= previous_signal and current_macd > current_signal
-        histogram_rising = current_histogram > previous_histogram
+        histogram_expanding_2 = current_histogram > previous_histogram > prior_histogram
+        macd_above_zero = current_macd > 0
+        price_above_trend = current_price > current_trend_ema
 
-        if bullish_crossover and histogram_rising:
+        if bullish_crossover and histogram_expanding_2 and macd_above_zero and price_above_trend:
             signal_strength = min(abs(current_histogram) / (abs(current_macd) + 1e-10), 1.0)
             return TradingSignal(
                 symbol=symbol,
@@ -70,11 +79,14 @@ class MacdStrategy(BaseStrategy):
                 },
             )
 
-        # Bearish crossover: MACD crosses below signal line with falling histogram
+        # Bearish crossover: MACD crosses below signal line
+        # 70% WR gate: zero-line + 2-candle histogram contraction + price below trend EMA
         bearish_crossover = previous_macd >= previous_signal and current_macd < current_signal
-        histogram_falling = current_histogram < previous_histogram
+        histogram_contracting_2 = current_histogram < previous_histogram < prior_histogram
+        macd_below_zero = current_macd < 0
+        price_below_trend = current_price < current_trend_ema
 
-        if bearish_crossover and histogram_falling:
+        if bearish_crossover and histogram_contracting_2 and macd_below_zero and price_below_trend:
             signal_strength = min(abs(current_histogram) / (abs(current_macd) + 1e-10), 1.0)
             return TradingSignal(
                 symbol=symbol,
@@ -95,4 +107,4 @@ class MacdStrategy(BaseStrategy):
         return None
 
     def requires_minimum_candles(self) -> int:
-        return self.slow_period + self.signal_period + 10
+        return max(self.slow_period + self.signal_period + 10, self.trend_ema_period + 10)

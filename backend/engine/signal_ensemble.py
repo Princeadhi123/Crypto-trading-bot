@@ -47,7 +47,7 @@ class SignalEnsemble:
     def __init__(
         self,
         minimum_agreement_count: int = 2,
-        minimum_composite_confidence: float = 0.45,
+        minimum_composite_confidence: float = 0.55,
         conflict_cancellation_threshold: float = 0.3,
     ):
         self.minimum_agreement_count = minimum_agreement_count

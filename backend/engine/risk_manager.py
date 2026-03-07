@@ -46,7 +46,7 @@ class RiskManager:
         max_portfolio_risk_percent: float = 2.0,
         max_drawdown_percent: float = 10.0,
         max_concurrent_positions: int = 5,
-        min_signal_confidence: float = 0.45,
+        min_signal_confidence: float = 0.55,
         volatility_target_atr_percent: float = 1.5,
     ):
         self.max_portfolio_risk_percent = max_portfolio_risk_percent
