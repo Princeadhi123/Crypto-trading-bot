@@ -12,12 +12,29 @@ import {
   ChartTooltip, fmtCurrency, fmtPct, fmtPrice, fmtNumber
 } from '../components/ui'
 
+const DASHBOARD_PRICES_STORAGE_KEY = 'dashboard_market_prices'
+const DASHBOARD_PRICE_TRENDS_STORAGE_KEY = 'dashboard_price_trends'
+
 export default function Dashboard({ wsEvents }) {
   const [status, setStatus] = useState(null)
   const [portfolio, setPortfolio] = useState(null)
   const [positions, setPositions] = useState([])
-  const [prices, setPrices] = useState({})
-  const [priceTrends, setPriceTrends] = useState({})
+  const [prices, setPrices] = useState(() => {
+    try {
+      const stored = sessionStorage.getItem(DASHBOARD_PRICES_STORAGE_KEY)
+      return stored ? JSON.parse(stored) : {}
+    } catch {
+      return {}
+    }
+  })
+  const [priceTrends, setPriceTrends] = useState(() => {
+    try {
+      const stored = sessionStorage.getItem(DASHBOARD_PRICE_TRENDS_STORAGE_KEY)
+      return stored ? JSON.parse(stored) : {}
+    } catch {
+      return {}
+    }
+  })
   const [pnlChart, setPnlChart] = useState([])
   const [recentSignals, setRecentSignals] = useState([])
   const [loading, setLoading] = useState(false)
@@ -50,6 +67,20 @@ export default function Dashboard({ wsEvents }) {
       return incomingPrices
     })
   }, [])
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(DASHBOARD_PRICES_STORAGE_KEY, JSON.stringify(prices))
+    } catch {
+    }
+  }, [prices])
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(DASHBOARD_PRICE_TRENDS_STORAGE_KEY, JSON.stringify(priceTrends))
+    } catch {
+    }
+  }, [priceTrends])
 
   const fetchAll = useCallback(async () => {
     try {
