@@ -87,13 +87,23 @@ export default function Dashboard({ wsEvents }) {
         applyPriceUpdate(newPrices)
         
         if (latest.data.portfolio_value !== undefined) {
-          setPortfolio(prev => prev ? {
-            ...prev,
-            total_equity: latest.data.portfolio_value,
-            total_balance: latest.data.portfolio_value,
-            available_balance: latest.data.available_balance,
-            unrealized_pnl: latest.data.unrealized_pnl
-          } : prev)
+          setPortfolio(prev => {
+            if (!prev) return prev
+            if ((latest.data.active_positions_count ?? 0) === 0) {
+              return {
+                ...prev,
+                available_balance: latest.data.available_balance,
+                unrealized_pnl: 0,
+              }
+            }
+            return {
+              ...prev,
+              total_equity: latest.data.portfolio_value,
+              total_balance: latest.data.portfolio_value,
+              available_balance: latest.data.available_balance,
+              unrealized_pnl: latest.data.unrealized_pnl
+            }
+          })
         }
       })
       
@@ -194,6 +204,8 @@ export default function Dashboard({ wsEvents }) {
   const pnl = portfolio?.realized_pnl || 0
   const pnlPositive = pnl >= 0
   const winRate = portfolio?.win_rate || 0
+  const unrealizedPnl = portfolio?.unrealized_pnl || 0
+  const unrealizedPositive = unrealizedPnl >= 0
 
   return (
     <div className="p-6 space-y-5 animate-fade-in">
@@ -279,7 +291,7 @@ export default function Dashboard({ wsEvents }) {
       )}
 
       {/* ── Stat row ────────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         <StatCard
           title="Portfolio Value"
           value={fmtCurrency(portfolio?.total_equity, 4)}
@@ -297,9 +309,16 @@ export default function Dashboard({ wsEvents }) {
         <StatCard
           title="Open Positions"
           value={positions.length}
-          subtitle={`Unrealized: ${fmtCurrency(portfolio?.unrealized_pnl, 4)}`}
+          subtitle="Currently active"
           icon={Activity}
           accentColor="#3b82f6"
+        />
+        <StatCard
+          title="Unrealized P&L"
+          value={`${unrealizedPositive ? '+' : ''}${fmtCurrency(unrealizedPnl, 4)}`}
+          subtitle={unrealizedPositive ? 'Open profit' : 'Open loss'}
+          icon={unrealizedPositive ? TrendingUp : TrendingDown}
+          accentColor={unrealizedPositive ? '#10b981' : '#ef4444'}
         />
         <StatCard
           title="Win Rate"

@@ -102,7 +102,7 @@ export function StatCard({ title, value, subtitle, icon: Icon, accentColor = '#1
       </div>
       <div
         className="text-[22px] font-bold mono tracking-tight mb-1"
-        style={{ color: 'var(--text-primary)' }}
+        style={{ color: accentColor }}
       >
         {value}
       </div>
