@@ -44,9 +44,12 @@ export default function Trades() {
   const [filterStatus, setFilterStatus] = useState('')
   const [filterSymbol, setFilterSymbol] = useState('')
   const [loading, setLoading] = useState(true)
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false)
 
-  const fetchTrades = useCallback(async () => {
-    setLoading(true)
+  const fetchTrades = useCallback(async (showLoading = false) => {
+    if (showLoading) {
+      setLoading(true)
+    }
     try {
       const params = {
         limit: PAGE_SIZE,
@@ -64,16 +67,19 @@ export default function Trades() {
       ])
       setTrades(tradesRes.data)
       setTotalCount(countRes.data.count)
+      setHasLoadedOnce(true)
     } catch (e) {
       console.error(e)
     } finally {
-      setLoading(false)
+      if (showLoading) {
+        setLoading(false)
+      }
     }
   }, [page, filterStatus, filterSymbol])
 
   useEffect(() => {
-    fetchTrades()
-    const interval = setInterval(fetchTrades, 1000)  // 1 second for real-time updates
+    fetchTrades(true)
+    const interval = setInterval(() => fetchTrades(false), 1000)  // 1 second for real-time updates
     return () => clearInterval(interval)
   }, [fetchTrades])
 
@@ -120,7 +126,7 @@ export default function Trades() {
       </div>
 
       <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-        {trades.length === 0 && !loading ? (
+        {trades.length === 0 && hasLoadedOnce ? (
           <EmptyState icon={History} title="No trades found" description="Trades appear here once the bot starts executing" />
         ) : (
           <div className="overflow-x-auto">
