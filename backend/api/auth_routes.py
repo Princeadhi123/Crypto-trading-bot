@@ -8,10 +8,10 @@ Configure in backend/.env:
 
 If ADMIN_PASSWORD_HASH is not set this router returns 503 (login system disabled).
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from api.auth import create_access_token, verify_password, get_admin_credentials
+from api.auth import create_access_token, verify_password, get_admin_credentials, rate_limit
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -22,7 +22,8 @@ class LoginRequest(BaseModel):
 
 
 @router.post("/login")
-async def login(body: LoginRequest):
+async def login(request: Request, body: LoginRequest):
+    rate_limit(request, max_calls=5, window_secs=60)
     admin_user, admin_hash = get_admin_credentials()
     if not admin_hash:
         raise HTTPException(

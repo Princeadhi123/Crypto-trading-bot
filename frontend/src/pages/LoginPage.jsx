@@ -79,7 +79,7 @@ export default function LoginPage({ onLogin }) {
                   type="text"
                   value={username}
                   onChange={e => setUsername(e.target.value)}
-                  placeholder="admin"
+                  placeholder="username"
                   autoComplete="username"
                   autoFocus
                   className="input-field w-full"
@@ -155,11 +155,6 @@ export default function LoginPage({ onLogin }) {
             </button>
           </form>
         </div>
-
-        <p className="text-center text-[11px] mt-5" style={{ color: 'var(--text-muted)' }}>
-          Set <code style={{ color: 'var(--text-secondary)' }}>ADMIN_PASSWORD_HASH</code> in{' '}
-          <code style={{ color: 'var(--text-secondary)' }}>backend/.env</code> to enable login.
-        </p>
       </div>
     </div>
   )

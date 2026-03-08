@@ -5,7 +5,6 @@ Security module: JWT login authentication and in-memory rate limiter.
 - Leave ADMIN_PASSWORD_HASH empty to run in dev mode with auth disabled (localhost only).
 - Rate limiting is always enforced for mutating/action endpoints.
 """
-import hmac
 import os
 import secrets
 import time
