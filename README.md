@@ -23,6 +23,9 @@ A full end-to-end automated cryptocurrency trading bot with a modern React dashb
 - **100+ Exchange Support**: Binance, Coinbase, Kraken, OKX, Bybit and more (via CCXT)
 - **Trade History**: Full paginated log with filtering
 - **Analytics Page**: Per-strategy win rate, P&L, rolling Sharpe, Kelly fraction, dynamic weights
+- **JWT Authentication**: Username/password login with signed Bearer tokens for API and WebSocket access
+- **Field Encryption**: Optional Fernet encryption for sensitive SQLite fields such as `notes` and `signal_features`
+- **HTTPS Support**: Optional direct Uvicorn TLS for local testing and Nginx reverse proxy support for Linux deployment
 
 ---
 
@@ -49,17 +52,33 @@ A full end-to-end automated cryptocurrency trading bot with a modern React dashb
 │   │       ├── scalping_strategy.py
 │   │       └── pairs_strategy.py   # Statistical Arbitrage (BTC/ETH spread)
 │   ├── api/routes.py               # REST API endpoints
+│   ├── api/auth.py                 # JWT auth, validation, rate limiting
+│   ├── api/auth_routes.py          # Login + auth status endpoints
 │   ├── models/                     # Database models & schemas
+│   ├── utils/encryption.py         # Fernet helpers for encrypted DB fields
 │   ├── requirements.txt
 │   └── .env.example                # Copy to .env and configure
 ├── frontend/                       # React + TailwindCSS dashboard
 │   ├── src/
-│   │   ├── pages/                  # Dashboard, Strategies, Portfolio, Trades, Analytics, Settings
+│   │   ├── pages/                  # Login, Dashboard, Strategies, Portfolio, Trades, Analytics, Settings
 │   │   └── hooks/                  # WebSocket hook
 │   └── package.json
+├── generate-password-hash.py       # Generate bcrypt hashes for admin password
+├── generate-certs.py               # Generate self-signed local TLS certificates
+├── nginx.conf                      # Example Linux reverse-proxy config
 ├── start-backend.bat               # Windows one-click backend launcher
 └── start-frontend.bat              # Windows one-click frontend launcher
 ```
+
+---
+
+## Security Model
+
+- **Frontend uses no `.env` file**. The frontend is JWT-only and stores the login token in `sessionStorage`.
+- **Backend uses `.env`** for exchange keys, JWT auth, encryption keys, TLS paths, and runtime config.
+- **All `/api/*` routes require a valid Bearer token** when `ADMIN_PASSWORD_HASH` is configured.
+- **WebSocket `/ws` also requires a valid JWT** when login is enabled.
+- **If `ADMIN_PASSWORD_HASH` is empty**, authentication is disabled for local development only.
 
 ---
 
@@ -88,7 +107,15 @@ pip install -r requirements.txt
 copy .env.example .env       # Windows
 # cp .env.example .env       # macOS/Linux
 
-# Start the backend (runs on http://localhost:8000)
+# Optional: generate a bcrypt password hash for ADMIN_PASSWORD_HASH
+python ..\generate-password-hash.py   # Windows
+# python3 ../generate-password-hash.py # macOS/Linux
+
+# Optional: generate local self-signed certs for HTTPS dev
+python ..\generate-certs.py           # Windows
+# python3 ../generate-certs.py         # macOS/Linux
+
+# Start the backend (HTTP or HTTPS depending on SSL_CERTFILE / SSL_KEYFILE)
 python main.py
 ```
 
@@ -108,11 +135,44 @@ npm run dev
 
 Navigate to **http://localhost:5173** in your browser.
 
-> API docs (Swagger UI) available at **http://localhost:8000/docs**
+If `ADMIN_PASSWORD_HASH` is configured, the app will show the **login page first**. After successful login, the frontend stores a JWT in `sessionStorage` and uses it for all API and WebSocket requests.
+
+> API docs (Swagger UI) are available only when `ENABLE_DOCS=true`.
 
 ---
 
 ## Configuration
+
+### Frontend Configuration
+
+The frontend currently uses **no environment variables**. You do **not** need `frontend/.env` or `frontend/.env.example`.
+
+### Backend Authentication
+
+Configure JWT login in `backend/.env`:
+
+```env
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD_HASH=<bcrypt hash from generate-password-hash.py>
+JWT_SECRET=<random 64-char hex secret>
+```
+
+Notes:
+
+- `ADMIN_PASSWORD_HASH` enables authentication.
+- `JWT_SECRET` should be stable and private.
+- Changing `JWT_SECRET` invalidates all existing sessions.
+
+### Local HTTPS
+
+For local HTTPS testing, generate self-signed certificates and set:
+
+```env
+SSL_CERTFILE=certs/server.crt
+SSL_KEYFILE=certs/server.key
+```
+
+Leave both empty to run plain HTTP locally.
 
 ### Paper Trading (Default — Safe)
 The bot starts in paper trading mode with a virtual **$10,000** balance. Configure in `.env`:
@@ -143,6 +203,62 @@ DEFAULT_STOP_LOSS_PERCENT=2.0     # Default stop loss
 DEFAULT_TAKE_PROFIT_PERCENT=4.0   # Default take profit
 MAX_CONCURRENT_POSITIONS=5        # Max open trades at once
 ```
+
+---
+
+## Linux Deployment
+
+Recommended production architecture:
+
+- **FastAPI/Uvicorn bound to `127.0.0.1:8000`**
+- **Nginx in front** for HTTPS termination and reverse proxying
+- **Real TLS certificates** from Let's Encrypt
+- **Frontend built and served by Nginx** or proxied appropriately
+
+### Backend `.env` on Linux
+
+Use a server-specific `backend/.env`. Do not blindly copy local secrets.
+
+- **Generate a new `JWT_SECRET`** for the server
+- **Reuse `ADMIN_PASSWORD_HASH`** only if you want the same admin password
+- **Reuse `FIELD_ENCRYPTION_KEY`** only when migrating the same encrypted database
+- **Leave `SSL_CERTFILE` / `SSL_KEYFILE` empty** when Nginx handles TLS
+
+Example production-oriented values:
+
+```env
+HOST=127.0.0.1
+PORT=8000
+SSL_CERTFILE=
+SSL_KEYFILE=
+ENABLE_DOCS=false
+RELOAD=false
+```
+
+### Suggested Linux setup steps
+
+```bash
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip nginx
+
+cd backend
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+python3 main.py
+```
+
+Then configure Nginx using `nginx.conf` as a template, update the domain / certificate paths, and obtain a real certificate with Certbot.
+
+### Production auth troubleshooting
+
+If the deployed frontend gets repeated `403 Forbidden` responses from `/api/*` routes:
+
+- confirm the frontend build is up to date
+- confirm the site shows the login page first
+- sign in again so a fresh JWT is stored in `sessionStorage`
+- if you changed `JWT_SECRET`, all previous tokens become invalid and users must log in again
 
 ---
 
