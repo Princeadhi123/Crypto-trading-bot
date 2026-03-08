@@ -16,10 +16,14 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from api.routes import router
 from api.auth import check_ws_token, ws_connection_acquire, ws_connection_release, _limiter
+from api.auth_routes import router as auth_router
 from models.database import init_database
 from engine.trading_engine import trading_engine
 
 load_dotenv()
+
+if os.name == "nt":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 logging.basicConfig(
     level=logging.INFO,
@@ -176,13 +180,18 @@ app.add_middleware(_SecurityHeadersMiddleware)
 app.add_middleware(_BodySizeLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"],
+    allow_origins=[
+        "http://localhost:5173", "https://localhost:5173",
+        "http://localhost:3000", "https://localhost:3000",
+        "http://127.0.0.1:5173", "https://127.0.0.1:5173",
+    ],
     allow_credentials=False,
     allow_methods=["GET", "POST", "PUT", "PATCH", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "Accept"],
 )
 
 app.include_router(router, prefix="/api")
+app.include_router(auth_router, prefix="/api")
 
 
 # Maximum size of an incoming WebSocket message (bytes) — prevents memory exhaustion
@@ -237,4 +246,10 @@ if __name__ == "__main__":
     _port = int(os.getenv("PORT", "8000"))
     # reload=True is for development only — set RELOAD=false to disable
     _reload = os.getenv("RELOAD", "false").strip().lower() == "true"
-    uvicorn.run("main:app", host=_host, port=_port, reload=_reload)
+    _ssl_certfile = os.getenv("SSL_CERTFILE", "").strip() or None
+    _ssl_keyfile = os.getenv("SSL_KEYFILE", "").strip() or None
+    _ssl_kwargs = {}
+    if _ssl_certfile and _ssl_keyfile:
+        _ssl_kwargs = {"ssl_certfile": _ssl_certfile, "ssl_keyfile": _ssl_keyfile}
+        logger.info("SSL enabled: %s", _ssl_certfile)
+    uvicorn.run("main:app", host=_host, port=_port, reload=_reload, **_ssl_kwargs)

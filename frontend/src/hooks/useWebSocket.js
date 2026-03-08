@@ -1,8 +1,7 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
+import { getAuthToken } from '../auth'
 
-const _wsToken = import.meta.env.VITE_API_TOKEN || ''
-
-export function useWebSocket(onMessage) {
+export function useWebSocket(onMessage, enabled = true) {
   const socketRef = useRef(null)
   const [isConnected, setIsConnected] = useState(false)
   const reconnectTimeoutRef = useRef(null)
@@ -12,11 +11,17 @@ export function useWebSocket(onMessage) {
 
   const connect = useCallback(() => {
     if (!isMountedRef.current) return
+    if (!enabled) return
     // Use the same host/protocol as the page — routes through Vite proxy in dev,
     // works correctly in any deployed environment without hardcoding a port.
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const baseUrl = `${protocol}//${window.location.host}/ws`
-    const wsUrl = _wsToken ? `${baseUrl}?token=${encodeURIComponent(_wsToken)}` : baseUrl
+    const token = getAuthToken()
+    if (!token) {
+      setIsConnected(false)
+      return
+    }
+    const wsUrl = token ? `${baseUrl}?token=${encodeURIComponent(token)}` : baseUrl
     const socket = new WebSocket(wsUrl)
     socketRef.current = socket
 
@@ -39,7 +44,7 @@ export function useWebSocket(onMessage) {
     socket.onclose = () => {
       setIsConnected(false)
       // Only schedule reconnect if still mounted — prevents leak after unmount
-      if (isMountedRef.current) {
+      if (isMountedRef.current && enabled && getAuthToken()) {
         reconnectTimeoutRef.current = setTimeout(connect, 3000)
       }
     }
@@ -47,11 +52,13 @@ export function useWebSocket(onMessage) {
     socket.onerror = () => {
       socket.close()
     }
-  }, [])
+  }, [enabled])
 
   useEffect(() => {
     isMountedRef.current = true
-    connect()
+    if (enabled) {
+      connect()
+    }
     const pingInterval = setInterval(() => {
       if (socketRef.current?.readyState === WebSocket.OPEN) {
         socketRef.current.send(JSON.stringify({ action: 'ping' }))
@@ -64,7 +71,7 @@ export function useWebSocket(onMessage) {
       if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current)
       socketRef.current?.close()
     }
-  }, [connect])
+  }, [connect, enabled])
 
   return { isConnected }
 }

@@ -2,7 +2,7 @@ import React, { useState, useCallback } from 'react'
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom'
 import {
   LayoutDashboard, TrendingUp, Briefcase, History,
-  Settings, Zap, BarChart3, Circle, Radio
+  Settings, Zap, BarChart3, Circle, Radio, LogOut
 } from 'lucide-react'
 import { useWebSocket } from './hooks/useWebSocket'
 import Dashboard from './pages/Dashboard'
@@ -11,6 +11,8 @@ import Portfolio from './pages/Portfolio'
 import Trades from './pages/Trades'
 import SettingsPage from './pages/SettingsPage'
 import Analytics from './pages/Analytics'
+import LoginPage from './pages/LoginPage'
+import { needsLogin, clearAuthToken, isAuthenticated } from './auth'
 
 const NAV_GROUPS = [
   {
@@ -60,12 +62,24 @@ function NavItem({ path, label, icon: Icon }) {
 
 export default function App() {
   const [wsEvents, setWsEvents] = useState([])
+  const [authenticated, setAuthenticated] = useState(isAuthenticated)
 
   const handleWsMessage = useCallback((message) => {
     setWsEvents(prev => [message, ...prev].slice(0, 100))
   }, [])
 
-  const { isConnected } = useWebSocket(handleWsMessage)
+  const { isConnected } = useWebSocket(handleWsMessage, authenticated)
+
+  const handleLogin = () => setAuthenticated(true)
+
+  const handleLogout = () => {
+    clearAuthToken()
+    setAuthenticated(false)
+  }
+
+  if (!authenticated) {
+    return <LoginPage onLogin={handleLogin} />
+  }
 
   return (
     <BrowserRouter>
@@ -121,7 +135,7 @@ export default function App() {
 
           {/* Status footer */}
           <div className="px-4 pb-4 pt-3" style={{ borderTop: '1px solid var(--border)' }}>
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between mb-2.5">
               <div className="flex items-center gap-2">
                 {isConnected ? (
                   <>
@@ -141,6 +155,16 @@ export default function App() {
               </div>
               <Radio size={11} style={{ color: isConnected ? '#34d399' : 'var(--text-muted)' }} />
             </div>
+            <button
+              onClick={handleLogout}
+              className="flex items-center gap-2 w-full px-2 py-1.5 rounded-lg text-[11px] font-medium transition-all duration-150"
+              style={{ color: 'var(--text-muted)', background: 'none', border: 'none', cursor: 'pointer' }}
+              onMouseEnter={e => { e.currentTarget.style.color = '#f87171'; e.currentTarget.style.background = 'rgba(239,68,68,0.08)' }}
+              onMouseLeave={e => { e.currentTarget.style.color = 'var(--text-muted)'; e.currentTarget.style.background = 'none' }}
+            >
+              <LogOut size={12} />
+              Sign out
+            </button>
           </div>
         </aside>
 

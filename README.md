@@ -67,7 +67,7 @@ A full end-to-end automated cryptocurrency trading bot with a modern React dashb
 
 ### Windows (One-Click)
 
-Double-click `start-backend.bat` in one terminal and `start-frontend.bat` in another. Both scripts handle venv creation, dependency installation, and `.env` setup automatically.
+Double-click `start-backend.bat` in one terminal and `start-frontend.bat` in another. The backend script handles venv creation, dependency installation, and backend `.env` setup automatically. The frontend script installs dependencies and starts the Vite dev server.
 
 ### Manual Setup
 

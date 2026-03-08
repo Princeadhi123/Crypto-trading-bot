@@ -1,12 +1,33 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, Float, DateTime, Boolean, Integer, Text
+from sqlalchemy import String, Float, DateTime, Boolean, Integer, Text, TypeDecorator
 from datetime import datetime
 from typing import Optional
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+class EncryptedText(TypeDecorator):
+    """SQLAlchemy column type that transparently encrypts/decrypts using Fernet.
+    Falls back to plain text when FIELD_ENCRYPTION_KEY is not configured.
+    Safe to add to an existing DB — existing unencrypted values are returned as-is.
+    """
+    impl = Text
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        from utils.encryption import encrypt_value
+        return encrypt_value(value)
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        from utils.encryption import decrypt_value
+        return decrypt_value(value)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./trading_bot.db")
 
@@ -36,8 +57,8 @@ class TradeRecord(Base):
     is_paper_trade: Mapped[bool] = mapped_column(Boolean, default=True)
     opened_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    signal_features: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(EncryptedText, nullable=True)
+    signal_features: Mapped[Optional[str]] = mapped_column(EncryptedText, nullable=True)
     exit_reason: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
 
 

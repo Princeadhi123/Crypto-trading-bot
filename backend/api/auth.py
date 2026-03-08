@@ -1,39 +1,87 @@
 """
-Security module: API token authentication + in-memory rate limiter.
+Security module: JWT login authentication and in-memory rate limiter.
 
-- Set API_SECRET_TOKEN in backend/.env to enable authentication.
-- Leave it empty to run in dev mode with auth disabled (localhost only).
+- Set ADMIN_PASSWORD_HASH + JWT_SECRET for full JWT login system.
+- Leave ADMIN_PASSWORD_HASH empty to run in dev mode with auth disabled (localhost only).
 - Rate limiting is always enforced for mutating/action endpoints.
 """
 import hmac
 import os
+import secrets
 import time
 import re
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from dotenv import load_dotenv
 from fastapi import HTTPException, Request, Header
+import bcrypt
 
-# Load .env so the token is always available regardless of import order
+# Load .env so tokens are always available regardless of import order
 load_dotenv()
 
 # ---------------------------------------------------------------------------
-# Token auth
+# JWT auth
 # ---------------------------------------------------------------------------
-_SECRET_TOKEN: str = os.getenv("API_SECRET_TOKEN", "").strip()
+_ADMIN_USERNAME: str = os.getenv("ADMIN_USERNAME", "admin").strip()
+_ADMIN_PASSWORD_HASH: str = os.getenv("ADMIN_PASSWORD_HASH", "").strip()
+# JWT_SECRET: if not set, generate one per-process (users must re-login on restart)
+_JWT_SECRET: str = os.getenv("JWT_SECRET", "").strip() or secrets.token_hex(32)
+_JWT_ALGORITHM = "HS256"
+_JWT_EXPIRE_HOURS = 24
+
+try:
+    from jose import jwt, JWTError
+    import bcrypt
+    _JWT_AVAILABLE = True
+except ImportError:
+    _JWT_AVAILABLE = False
+
+
+def verify_password(plain: str, hashed: str) -> bool:
+    if not _JWT_AVAILABLE:
+        return False
+    try:
+        return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+    except Exception:
+        return False
+
+
+def create_access_token(data: dict) -> str:
+    if not _JWT_AVAILABLE:
+        raise RuntimeError("python-jose not installed")
+    payload = data.copy()
+    payload["exp"] = datetime.now(timezone.utc) + timedelta(hours=_JWT_EXPIRE_HOURS)
+    payload["iat"] = datetime.now(timezone.utc)
+    from jose import jwt as _jwt
+    return _jwt.encode(payload, _JWT_SECRET, algorithm=_JWT_ALGORITHM)
+
+
+def get_admin_credentials() -> tuple[str, str]:
+    return (_ADMIN_USERNAME, _ADMIN_PASSWORD_HASH)
+
+
+def _verify_jwt(token: str) -> bool:
+    if not _JWT_AVAILABLE:
+        return False
+    try:
+        from jose import jwt as _jwt, JWTError as _JWTError
+        _jwt.decode(token, _JWT_SECRET, algorithms=[_JWT_ALGORITHM])
+        return True
+    except Exception:
+        return False
 
 
 def require_auth(authorization: Optional[str] = Header(default=None)) -> None:
     """
     FastAPI dependency — enforces Bearer token authentication.
 
-    If API_SECRET_TOKEN is not configured the check is skipped (dev/local mode).
-    When configured every request must carry:
-        Authorization: Bearer <token>
+    Accepts a valid JWT when the login system is configured via ADMIN_PASSWORD_HASH.
+    If ADMIN_PASSWORD_HASH is not configured the check is skipped (dev/local mode).
     """
-    if not _SECRET_TOKEN:
-        return  # auth disabled — token not configured
+    if not _ADMIN_PASSWORD_HASH:
+        return  # auth disabled — login not configured
 
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(
@@ -42,12 +90,12 @@ def require_auth(authorization: Optional[str] = Header(default=None)) -> None:
             headers={"WWW-Authenticate": "Bearer"},
         )
     token = authorization[len("Bearer "):].strip()
-    # hmac.compare_digest prevents timing-based token enumeration attacks
-    if not hmac.compare_digest(token, _SECRET_TOKEN):
-        raise HTTPException(
-            status_code=403,
-            detail="Invalid API token",
-        )
+
+    # Try JWT first (login system)
+    if _ADMIN_PASSWORD_HASH and _verify_jwt(token):
+        return
+
+    raise HTTPException(status_code=403, detail="Invalid or expired token")
 
 
 # Maximum WebSocket connections allowed from a single IP
@@ -60,12 +108,11 @@ def check_ws_token(token: Optional[str]) -> bool:
     Validate a WebSocket connection token (passed as ?token= query param).
     Returns True if the connection is allowed.
     """
-    if not _SECRET_TOKEN:
-        return True
+    if not _ADMIN_PASSWORD_HASH:
+        return True  # auth disabled
     if not token:
         return False
-    # constant-time comparison prevents timing attacks
-    return hmac.compare_digest(token, _SECRET_TOKEN)
+    return _verify_jwt(token)
 
 
 def ws_connection_acquire(ip: str) -> bool:

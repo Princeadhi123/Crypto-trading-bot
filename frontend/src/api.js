@@ -1,22 +1,23 @@
 import axios from 'axios'
-
-// Read optional API token from frontend env (must match backend API_SECRET_TOKEN)
-const _apiToken = import.meta.env.VITE_API_TOKEN || ''
+import { getAuthToken } from './auth'
 
 const apiClient = axios.create({
   baseURL: '/api',
   timeout: 10000,
 })
 
-// Attach Bearer token to every request when configured
+// Attach Bearer token to every authenticated request using the stored JWT
 apiClient.interceptors.request.use((config) => {
-  if (_apiToken) {
-    config.headers['Authorization'] = `Bearer ${_apiToken}`
+  const token = getAuthToken()
+  if (token) {
+    config.headers['Authorization'] = `Bearer ${token}`
   }
   return config
 })
 
 export const botApi = {
+  login: (username, password) => axios.post('/api/auth/login', { username, password }),
+  authStatus: () => axios.get('/api/auth/status'),
   getStatus: () => apiClient.get('/status'),
   startBot: () => apiClient.post('/bot/start'),
   stopBot: () => apiClient.post('/bot/stop'),

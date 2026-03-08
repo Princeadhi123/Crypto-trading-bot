@@ -20,7 +20,7 @@ if not exist ".env" (
 echo.
 echo Backend starting on http://127.0.0.1:8000
 echo NOTE: API docs are disabled by default. Set ENABLE_DOCS=true in .env to enable.
-echo NOTE: Set API_SECRET_TOKEN in .env to enable authentication.
+echo NOTE: Set ADMIN_USERNAME, ADMIN_PASSWORD_HASH, and JWT_SECRET in .env to enable authentication.
 echo Press Ctrl+C to stop.
 echo.
 python main.py

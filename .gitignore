@@ -21,6 +21,9 @@ env/
 .env.local
 .env.production
 
+# TLS certificates — private key must never be committed
+certs/
+
 # Database files
 *.db
 *.sqlite

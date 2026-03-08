@@ -7,11 +7,6 @@ if not exist "node_modules" (
     npm install
 )
 
-if not exist ".env" (
-    echo Creating .env from example...
-    copy .env.example .env
-)
-
 echo.
 echo Frontend starting on http://localhost:5173
 echo Press Ctrl+C to stop.
