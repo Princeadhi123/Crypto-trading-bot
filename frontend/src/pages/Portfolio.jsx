@@ -95,6 +95,7 @@ export default function Portfolio({ wsEvents }) {
   const drawdownColor = drawdown < 5 ? '#10b981' : drawdown < 10 ? '#f59e0b' : '#ef4444'
 
   const pieData = strategyPerf.filter(s => s.total_trades > 0).map(s => ({ name: s.strategy, value: s.total_trades }))
+  const hasStrategyData = pieData.length > 0
   const handleRefresh = async () => {
     setLoading(true)
     await fetchData()
@@ -154,9 +155,9 @@ export default function Portfolio({ wsEvents }) {
         </div>
       </div>
 
-      {pieData.length > 0 && (
-        <div className="card">
-          <h2 className="text-[13px] font-semibold mb-4" style={{ color: 'var(--text-primary)' }}>Trade Distribution by Strategy</h2>
+      <div className="card">
+        <h2 className="text-[13px] font-semibold mb-4" style={{ color: 'var(--text-primary)' }}>Trade Distribution by Strategy</h2>
+        {hasStrategyData ? (
           <ResponsiveContainer width="100%" height={190}>
             <PieChart>
               <Pie data={pieData} cx="50%" cy="50%" innerRadius={50} outerRadius={75} dataKey="value" paddingAngle={4}>
@@ -173,8 +174,10 @@ export default function Portfolio({ wsEvents }) {
               />
             </PieChart>
           </ResponsiveContainer>
-        </div>
-      )}
+        ) : (
+          <EmptyState icon={Award} title="No strategy distribution yet" description="Strategy allocation will appear here after trades are recorded" />
+        )}
+      </div>
 
       <div
         className="flex items-start gap-3 p-4 rounded-xl text-[12px]"
