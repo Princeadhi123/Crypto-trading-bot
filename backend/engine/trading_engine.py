@@ -156,6 +156,14 @@ class TradingEngine:
         self._main_loop_task: Optional[asyncio.Task] = None
         self._price_stream_task: Optional[asyncio.Task] = None
         self._broadcast_callback = None
+        # Public (keyless) exchange client for market data — lets paper trading run
+        # on REAL candles instead of simulated random walks (which produced
+        # meaningless training data and unrealistic signals)
+        self._public_data_exchange: Optional[ccxt.Exchange] = None
+        # ML adaptive signal filter — scores every entry with a win-probability
+        # model trained on this bot's own closed-trade history
+        from engine.ml_filter import MLSignalFilter
+        self.ml_filter = MLSignalFilter()
 
     @property
     def _active_timeframe(self) -> str:
@@ -261,16 +269,35 @@ class TradingEngine:
     def get_funding_rates(self) -> list[dict]:
         return self.funding_rate_signal.get_all_cached()
 
+    def _get_data_exchange(self) -> Optional[ccxt.Exchange]:
+        """Returns an exchange usable for market data. Prefers the authenticated
+        exchange; falls back to a public keyless Binance client so paper trading
+        analyses REAL candles instead of simulated random walks."""
+        if self.exchange is not None:
+            return self.exchange
+        if self._public_data_exchange is None:
+            try:
+                self._public_data_exchange = ccxt.binance({
+                    "enableRateLimit": True,
+                    "options": {"defaultType": "spot"},
+                })
+                logger.info("Public market-data exchange initialized (paper mode uses real candles)")
+            except Exception as exc:
+                logger.warning("Could not create public data exchange: %s", exc)
+                return None
+        return self._public_data_exchange
+
     async def _fetch_ohlcv(self, symbol: str) -> Optional[pd.DataFrame]:
         cache_key = f"{symbol}_{self._active_timeframe}"
         try:
-            if self.exchange is None:
+            data_exchange = self._get_data_exchange()
+            if data_exchange is None:
                 return self._generate_simulated_ohlcv(symbol)
             cached = self.ohlcv_cache.get(cache_key)
             last_fetch = self._ohlcv_cache_time.get(cache_key, 0)
             if cached is not None and (time.time() - last_fetch) < self._loop_interval:
                 return cached
-            raw_data = await self.exchange.fetch_ohlcv(
+            raw_data = await data_exchange.fetch_ohlcv(
                 symbol, timeframe=self._active_timeframe, limit=OHLCV_LIMIT)
             if not raw_data:
                 return None
@@ -349,13 +376,20 @@ class TradingEngine:
         }
 
     async def _fetch_current_price(self, symbol: str) -> Optional[float]:
+        # Prefer live market price from the background refresh loop — the OHLCV
+        # cache close can be stale or (offline fallback) simulated, which caused
+        # paper TWAP fills to execute at prices desynced from the real market
+        live_price = self.market_prices.get(symbol)
+        if live_price and live_price > 0:
+            return float(live_price)
         cache_key = f"{symbol}_{self._active_timeframe}"
         cached_df = self.ohlcv_cache.get(cache_key)
         if cached_df is not None:
             return float(cached_df["close"].iloc[-1])
         try:
-            if self.exchange:
-                ticker = await self.exchange.fetch_ticker(symbol)
+            data_exchange = self._get_data_exchange()
+            if data_exchange:
+                ticker = await data_exchange.fetch_ticker(symbol)
                 return ticker["last"]
         except Exception:
             pass
@@ -473,6 +507,44 @@ class TradingEngine:
         self.risk_manager.update_peak_portfolio_value(portfolio_value)
         best_kelly = max((self.performance_tracker.get_kelly_fraction(s.strategy_name)
                          for s in es.raw_signals), default=0.02)
+
+        # Collect all ML training features at entry time. Used both for the
+        # adaptive ML gate below and persisted for continuous retraining.
+        ml_features = {
+            "symbol": es.symbol,
+            "direction": es.direction,
+            "regime": es.regime.value,
+            "ensemble_confidence": round(adjusted_confidence, 4),
+            "regime_boost": es.regime_boost,
+            "agreeing_strategies_count": len(es.agreeing_strategies),
+            "disagreeing_strategies_count": len(es.disagreeing_strategies),
+            "sentiment_value": self.current_sentiment.get("value", 50) if self.current_sentiment else 50,
+            "sentiment_bias": self.current_sentiment.get("trading_bias", "BOTH") if self.current_sentiment else "BOTH",
+            "funding_rate": round(funding_reading.funding_rate, 8) if funding_reading else 0.0,
+            "funding_bias": funding_reading.signal_bias if funding_reading else "NEUTRAL",
+            "kelly_fraction": round(best_kelly, 4),
+            "stop_distance_pct": round(abs(es.weighted_entry_price - es.suggested_stop_loss) / es.weighted_entry_price * 100, 4),
+            "risk_reward_ratio": round(abs(es.suggested_take_profit - es.weighted_entry_price) / max(abs(es.weighted_entry_price - es.suggested_stop_loss), 1e-10), 3),
+            "portfolio_drawdown_at_entry": round(self.risk_manager.compute_current_drawdown_percent(portfolio_value), 2),
+            "open_positions_at_entry": len(open_symbols),
+            "hft_mode": self.hft_mode,
+        }
+
+        # --- ML adaptive filter: block entries the model predicts will lose ---
+        # Hedge legs (forced_quantity) bypass the gate — they must always execute
+        # to keep pairs trades delta-neutral once the primary leg is open.
+        if forced_quantity is None:
+            ml_probability = self.ml_filter.score(ml_features)
+            if ml_probability is not None:
+                ml_features["ml_win_probability"] = round(ml_probability, 4)
+                if ml_probability < self.ml_filter.min_win_probability:
+                    logger.info("ML filter blocked %s %s: win probability %.3f < %.3f",
+                                es.direction, es.symbol, ml_probability,
+                                self.ml_filter.min_win_probability)
+                    return
+                # Scale confidence by model conviction: prob 0.5 → 1.0x, prob 1.0 → 1.25x
+                adjusted_confidence = min(adjusted_confidence * (0.75 + ml_probability * 0.5), 1.0)
+
         if forced_quantity is not None:
             # Bug #4: pairs hedge leg bypasses risk manager to match primary leg's USD value
             sizing = self.risk_manager.calculate_position_size(
@@ -490,6 +562,7 @@ class TradingEngine:
                 stop_loss_price=es.suggested_stop_loss, signal_confidence=adjusted_confidence,
                 open_positions_count=len(self.active_positions), open_symbols=open_symbols,
                 symbol=es.symbol, side=es.direction, kelly_fraction=best_kelly,
+                take_profit_price=es.suggested_take_profit,
             )
         if not sizing.allowed:
             logger.info("Rejected %s: %s", es.symbol, sizing.rejection_reason)
@@ -562,29 +635,8 @@ class TradingEngine:
                 return
         label = " + ".join(es.agreeing_strategies)
 
-        # Collect all ML training features at entry time.
-        # These will be used in Phase 3 to train an XGBoost classifier:
-        # "given these market conditions at entry, did this trade win or lose?"
-        ml_features = {
-            "symbol": es.symbol,
-            "direction": es.direction,
-            "regime": es.regime.value,
-            "ensemble_confidence": round(adjusted_confidence, 4),
-            "regime_boost": es.regime_boost,
-            "agreeing_strategies_count": len(es.agreeing_strategies),
-            "disagreeing_strategies_count": len(es.disagreeing_strategies),
-            "sentiment_value": self.current_sentiment.get("value", 50) if self.current_sentiment else 50,
-            "sentiment_bias": self.current_sentiment.get("trading_bias", "BOTH") if self.current_sentiment else "BOTH",
-            "funding_rate": round(funding_reading.funding_rate, 8) if funding_reading else 0.0,
-            "funding_bias": funding_reading.signal_bias if funding_reading else "NEUTRAL",
-            "kelly_fraction": round(best_kelly, 4),
-            "stop_distance_pct": round(abs(es.weighted_entry_price - es.suggested_stop_loss) / es.weighted_entry_price * 100, 4),
-            "risk_reward_ratio": round(abs(es.suggested_take_profit - es.weighted_entry_price) / max(abs(es.weighted_entry_price - es.suggested_stop_loss), 1e-10), 3),
-            "portfolio_drawdown_at_entry": round(self.risk_manager.compute_current_drawdown_percent(portfolio_value), 2),
-            "open_positions_at_entry": len(open_symbols),
-            "hft_mode": self.hft_mode,
-            "raw_signal_details": [s.details for s in es.raw_signals],
-        }
+        # Attach raw per-strategy details to the persisted feature snapshot
+        ml_features["raw_signal_details"] = [s.details for s in es.raw_signals]
 
         # Bug #1: register in-memory BEFORE DB write — a DB crash must never orphan a live exchange fill
         position = ActivePosition(
@@ -823,6 +875,13 @@ class TradingEngine:
 
         logger.info("Closed %s %s at %.4f | PnL: %.2f (%.2f%%) | Reason: %s | Trailing: %s",
                     position.side, symbol, exit_price, pnl, pnl_percent, reason, position.trailing_stop_activated)
+
+        # Adaptive learning: count the closed trade and retrain the ML model in the
+        # background once enough new outcomes have accumulated
+        self.ml_filter.record_trade_closed()
+        if self.ml_filter.retrain_due():
+            # Reference stored on the filter so the task isn't garbage-collected mid-flight
+            self.ml_filter._retrain_task = asyncio.create_task(self.ml_filter.retrain_async())
 
         await self._broadcast("trade_closed", {
             "symbol": symbol, "exit_price": exit_price,
@@ -1211,6 +1270,12 @@ class TradingEngine:
         self.recent_signals.clear()
         if self.exchange:
             await self.exchange.close()
+        if self._public_data_exchange is not None:
+            try:
+                await self._public_data_exchange.close()
+            except Exception:
+                pass
+            self._public_data_exchange = None
         await close_public_futures_exchange()
         logger.info("Trading engine stopped")
 

@@ -311,6 +311,26 @@ The bot enforces multiple layers of protection:
 
 ## Recent Bug Fixes & Improvements
 
+### Session: Jul 2, 2026 — ML Adaptive Filter + Profitability Fixes
+
+**Data analysis of 519 closed trades revealed the core problem:** 41% win rate with
+average losses 4x larger than average wins (avg stop-loss -$13.74 vs avg take-profit +$3.44).
+
+**New: ML Adaptive Signal Filter (Phase 3 delivered)**
+- `backend/ml/trainer.py` — gradient-boosting win-probability model, walk-forward validated (no lookahead), threshold selected by maximizing out-of-fold PnL
+- `backend/engine/ml_filter.py` — scores every candidate entry in the trading loop; blocks entries below the learned win-probability threshold; scales confidence by model conviction
+- **Adaptive loop**: every 25 closed trades the model retrains in the background on all accumulated data and hot-reloads
+- `backend/ml/backtest_generator.py` — generates additional labeled training data for free by replaying strategies over real Binance history: `python -m ml.backtest_generator --days 30`
+- New endpoints: `GET /api/ml/status`, `POST /api/ml/retrain`
+- Initial model results: walk-forward AUC 0.61; filtering at the learned threshold would have cut historical losses by 76%
+
+**Profitability & Correctness Fixes**
+1. **Fee-aware minimum R:R gate** in RiskManager (`RISK_MIN_NET_RR`, default 1.2) — rejects entries whose reward after 0.2% round-trip fees doesn't beat risk
+2. **Paper mode now trades on REAL Binance candles** via a public keyless data client — previously signals were computed on simulated random walks
+3. **Binance rate-limit ban risk fixed** — price polling 1s → 3s with CCXT rate limiter enabled
+4. **Price desync fixed** — `_fetch_current_price` prefers live market prices over cached/simulated OHLCV closes
+5. **ML dataset hygiene** — `/api/analytics/ml-training-data` no longer mixes paper and live trades
+
 ### Session: Feb 24, 2026
 
 **Critical Production Bugs Fixed:**

@@ -70,9 +70,11 @@ PRICE_SYMBOLS = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "DOGE/USDT", "X
 
 
 async def _live_price_refresh_loop():
-    """Background task: fetches real-time prices from Binance public API every 1s.
-    Runs independently of the trading bot — prices stay current even when bot is stopped."""
-    public_exchange = ccxt.binance({"options": {"defaultType": "spot"}})
+    """Background task: fetches real-time prices from Binance public API every 3s.
+    Runs independently of the trading bot — prices stay current even when bot is stopped.
+    NOTE: fetch_tickers carries request weight ~40 on Binance; polling faster than ~2-3s
+    exceeds the 1200 weight/min IP limit and triggers bans (HTTP 429 / 418)."""
+    public_exchange = ccxt.binance({"enableRateLimit": True, "options": {"defaultType": "spot"}})
     logger.info("Live price refresh loop started")
     try:
         while True:
@@ -86,7 +88,7 @@ async def _live_price_refresh_loop():
                 raise
             except Exception as exc:
                 logger.warning("Live price refresh failed: %s", exc)
-            await asyncio.sleep(1)  # 1 second for real-time updates
+            await asyncio.sleep(3)  # 3s keeps request weight safely under Binance IP limits
     finally:
         try:
             await public_exchange.close()

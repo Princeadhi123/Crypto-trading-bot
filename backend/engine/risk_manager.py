@@ -1,9 +1,12 @@
 from dataclasses import dataclass
 from typing import Optional
 import logging
-import math
+import os
 
 logger = logging.getLogger(__name__)
+
+# Round-trip taker fee per unit of notional (0.1% entry + 0.1% exit)
+ROUND_TRIP_FEE_RATE = 0.002
 
 
 
@@ -16,13 +19,21 @@ class PositionSizeResult:
     rejection_reason: Optional[str] = None
 
 
+# Constants for correlated pairs to avoid literal duplication
+BTC_USDT = "BTC/USDT"
+ETH_USDT = "ETH/USDT"
+BNB_USDT = "BNB/USDT"
+SOL_USDT = "SOL/USDT"
+MATIC_USDT = "MATIC/USDT"
+AVAX_USDT = "AVAX/USDT"
+
 CORRELATED_PAIRS: dict[str, list[str]] = {
-    "BTC/USDT": ["ETH/USDT", "BNB/USDT", "SOL/USDT"],
-    "ETH/USDT": ["BTC/USDT", "BNB/USDT", "MATIC/USDT"],
-    "BNB/USDT": ["BTC/USDT", "ETH/USDT"],
-    "SOL/USDT": ["BTC/USDT", "AVAX/USDT"],
-    "MATIC/USDT": ["ETH/USDT", "SOL/USDT"],
-    "AVAX/USDT": ["SOL/USDT", "BTC/USDT"],
+    BTC_USDT: [ETH_USDT, BNB_USDT, SOL_USDT],
+    ETH_USDT: [BTC_USDT, BNB_USDT, MATIC_USDT],
+    BNB_USDT: [BTC_USDT, ETH_USDT],
+    SOL_USDT: [BTC_USDT, AVAX_USDT],
+    MATIC_USDT: [ETH_USDT, SOL_USDT],
+    AVAX_USDT: [SOL_USDT, BTC_USDT],
 }
 
 
@@ -48,12 +59,22 @@ class RiskManager:
         max_concurrent_positions: int = 5,
         min_signal_confidence: float = 0.55,
         volatility_target_atr_percent: float = 1.5,
+        min_net_risk_reward: Optional[float] = None,
     ):
         self.max_portfolio_risk_percent = max_portfolio_risk_percent
         self.max_drawdown_percent = max_drawdown_percent
         self.max_concurrent_positions = max_concurrent_positions
         self.min_signal_confidence = min_signal_confidence
         self.volatility_target_atr_percent = volatility_target_atr_percent
+        # Minimum reward:risk AFTER round-trip fees. With a ~41% historical win
+        # rate, breakeven requires R:R > 1.44 — default 1.2 net of fees blocks the
+        # structurally unprofitable tight-target trades observed in trade history.
+        if min_net_risk_reward is None:
+            try:
+                min_net_risk_reward = float(os.getenv("RISK_MIN_NET_RR", "1.2"))
+            except ValueError:
+                min_net_risk_reward = 1.2
+        self.min_net_risk_reward = min_net_risk_reward
         self.peak_portfolio_value: float = 0.0
         self.circuit_breaker_active: bool = False
 
@@ -135,7 +156,7 @@ class RiskManager:
         vol_scale = target_pct / stop_distance_pct
         return max(0.2, min(vol_scale, 2.0))
 
-    def _is_correlated_conflict(self, symbol: str, open_symbols: list[str], side: str) -> bool:
+    def _is_correlated_conflict(self, symbol: str, open_symbols: list[str]) -> bool:
         """
         Prevents opening a new LONG position if a highly correlated asset
         is already long. This avoids concentrated directional bets disguised
@@ -147,19 +168,16 @@ class RiskManager:
                 return True
         return False
 
-    def calculate_position_size(
+    def _check_basic_rejections(
         self,
         portfolio_value: float,
-        entry_price: float,
-        stop_loss_price: float,
         signal_confidence: float,
         open_positions_count: int,
         open_symbols: list[str],
         symbol: str,
-        side: str = "BUY",
-        kelly_fraction: float = 0.02,
-    ) -> PositionSizeResult:
-
+        side: str
+    ) -> Optional[PositionSizeResult]:
+        """Runs the basic gate checks before doing heavy sizing math."""
         # 1. Signal confidence gate
         if signal_confidence < self.min_signal_confidence:
             return PositionSizeResult(
@@ -182,7 +200,7 @@ class RiskManager:
             )
 
         # 4. Correlation guard (only for BUY — shorts can hedge)
-        if side == "BUY" and self._is_correlated_conflict(symbol, open_symbols, side):
+        if side == "BUY" and self._is_correlated_conflict(symbol, open_symbols):
             return PositionSizeResult(
                 allowed=False, quantity=0.0, position_value=0.0, risk_amount=0.0,
                 rejection_reason=f"Correlated position already open; diversification guard triggered for {symbol}",
@@ -195,12 +213,61 @@ class RiskManager:
                 rejection_reason=f"Drawdown circuit breaker active (>{self.max_drawdown_percent:.1f}%)",
             )
 
+        return None
+
+    def _check_fee_aware_rr(
+        self,
+        entry_price: float,
+        take_profit_price: Optional[float],
+        price_risk_per_unit: float
+    ) -> Optional[PositionSizeResult]:
+        """Reject any entry whose net (fee-adjusted) reward:risk falls below the minimum."""
+        if take_profit_price is not None and take_profit_price > 0 and self.min_net_risk_reward > 0:
+            reward_per_unit = abs(take_profit_price - entry_price)
+            fee_per_unit = entry_price * ROUND_TRIP_FEE_RATE
+            net_reward = reward_per_unit - fee_per_unit
+            net_risk = price_risk_per_unit + fee_per_unit
+            net_rr = (net_reward / net_risk) if net_risk > 0 else 0.0
+            if net_rr < self.min_net_risk_reward:
+                return PositionSizeResult(
+                    allowed=False, quantity=0.0, position_value=0.0, risk_amount=0.0,
+                    rejection_reason=(
+                        f"Net R:R {net_rr:.2f} below minimum {self.min_net_risk_reward:.2f} "
+                        f"(reward {reward_per_unit:.6f} vs risk {price_risk_per_unit:.6f} + fees)"
+                    ),
+                )
+        return None
+
+    def calculate_position_size(
+        self,
+        portfolio_value: float,
+        entry_price: float,
+        stop_loss_price: float,
+        signal_confidence: float,
+        open_positions_count: int,
+        open_symbols: list[str],
+        symbol: str,
+        side: str = "BUY",
+        kelly_fraction: float = 0.02,
+        take_profit_price: Optional[float] = None,
+    ) -> PositionSizeResult:
+
+        basic_rejection = self._check_basic_rejections(
+            portfolio_value, signal_confidence, open_positions_count, open_symbols, symbol, side
+        )
+        if basic_rejection:
+            return basic_rejection
+
         price_risk_per_unit = abs(entry_price - stop_loss_price)
         if price_risk_per_unit <= 0:
             return PositionSizeResult(
                 allowed=False, quantity=0.0, position_value=0.0, risk_amount=0.0,
                 rejection_reason="Invalid stop loss: same as entry price",
             )
+
+        rr_rejection = self._check_fee_aware_rr(entry_price, take_profit_price, price_risk_per_unit)
+        if rr_rejection:
+            return rr_rejection
 
         # 6. Kelly criterion base sizing
         # Use the Kelly fraction from strategy performance tracker (half-Kelly).

@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, desc, and_, Integer, case
@@ -11,7 +11,10 @@ from engine.trading_engine import trading_engine, STRATEGY_REGISTRY, HFT_STRATEG
 from api.auth import require_auth, rate_limit, validate_symbol, validate_status, validate_strategy_id
 
 logger = logging.getLogger(__name__)
+SESSION_ERR_MSG = "Session cannot be None"
 router = APIRouter(dependencies=[Depends(require_auth)])
+
+SessionDep = Annotated[AsyncSession, Depends(get_db_session)]
 
 
 def _settings_row_to_dict(row: BotSettings) -> dict:
@@ -42,7 +45,7 @@ async def _get_or_create_settings(session: AsyncSession) -> BotSettings:
 
 
 @router.get("/status")
-async def get_bot_status(session: AsyncSession = Depends(get_db_session)):
+async def get_bot_status(session: SessionDep):
     settings = await _get_or_create_settings(session)
     engine_status = trading_engine.get_status()
     return {
@@ -53,7 +56,7 @@ async def get_bot_status(session: AsyncSession = Depends(get_db_session)):
 
 
 @router.get("/settings")
-async def get_settings(session: AsyncSession = Depends(get_db_session)):
+async def get_settings(session: SessionDep):
     settings = await _get_or_create_settings(session)
     settings_dict = _settings_row_to_dict(settings)
     # If bot is running in paper mode, show the actual in-memory balance (not stale DB value)
@@ -64,7 +67,7 @@ async def get_settings(session: AsyncSession = Depends(get_db_session)):
 
 
 @router.put("/settings")
-async def update_settings(request: Request, payload: BotSettingsSchema, session: AsyncSession = Depends(get_db_session)):
+async def update_settings(request: Request, payload: BotSettingsSchema, session: SessionDep):
     rate_limit(request, max_calls=10, window_secs=60)
     settings = await _get_or_create_settings(session)
     # Use in-memory balance if bot is running, otherwise use DB value
@@ -79,7 +82,8 @@ async def update_settings(request: Request, payload: BotSettingsSchema, session:
     settings.active_strategies = ",".join(payload.active_strategies)
     settings.active_symbols = ",".join(payload.active_symbols)
     settings.hft_mode = payload.hft_mode
-    settings.updated_at = datetime.utcnow()
+    from datetime import timezone
+    settings.updated_at = datetime.now(timezone.utc)
     await session.commit()
 
     # Update paper balance in memory ONLY if user actually changed it in settings form
@@ -103,8 +107,8 @@ async def update_settings(request: Request, payload: BotSettingsSchema, session:
     }
 
 
-@router.post("/bot/start")
-async def start_bot(request: Request, session: AsyncSession = Depends(get_db_session)):
+@router.post("/bot/start", responses={400: {"description": "Bot is already running"}})
+async def start_bot(request: Request, session: SessionDep):
     rate_limit(request, max_calls=5, window_secs=60)
     if trading_engine.is_running:
         raise HTTPException(status_code=400, detail="Bot is already running")
@@ -117,7 +121,7 @@ async def start_bot(request: Request, session: AsyncSession = Depends(get_db_ses
 
 
 @router.post("/bot/stop")
-async def stop_bot(request: Request, session: AsyncSession = Depends(get_db_session)):
+async def stop_bot(request: Request, session: SessionDep):
     rate_limit(request, max_calls=5, window_secs=60)
     await trading_engine.stop()
     settings = await _get_or_create_settings(session)
@@ -126,7 +130,7 @@ async def stop_bot(request: Request, session: AsyncSession = Depends(get_db_sess
     return {"message": "Bot stopped"}
 
 
-@router.post("/bot/reset-drawdown")
+@router.post("/bot/reset-drawdown", responses={400: {"description": "Bot is not running, risk manager not initialized, or circuit breaker not active"}})
 async def reset_drawdown_circuit_breaker(request: Request):
     rate_limit(request, max_calls=5, window_secs=60)
     """
@@ -159,11 +163,12 @@ async def reset_drawdown_circuit_breaker(request: Request):
 
 
 @router.get("/portfolio")
-async def get_portfolio(session: AsyncSession = Depends(get_db_session)):
+async def get_portfolio(session: SessionDep):
     stats = trading_engine.get_portfolio_stats()
     is_paper = trading_engine.paper_trading
 
-    today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    from datetime import timezone
+    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     week_ago = today - timedelta(days=7)
 
     # Aggregate counts and sums with DB-side SQL — avoids loading full table into RAM
@@ -248,8 +253,10 @@ async def get_trade_history(
     offset: int = Query(default=0, ge=0),
     symbol: Optional[str] = Query(default=None, max_length=20),
     status: Optional[str] = Query(default=None),
-    session: AsyncSession = Depends(get_db_session),
+    session: SessionDep = None,
 ):
+    if session is None:
+        raise ValueError(SESSION_ERR_MSG)
     status = validate_status(status)
     query = select(TradeRecord).order_by(desc(TradeRecord.opened_at))
     if symbol:
@@ -267,8 +274,10 @@ async def get_trade_history(
 async def get_trade_count(
     symbol: Optional[str] = Query(default=None, max_length=20),
     status: Optional[str] = Query(default=None),
-    session: AsyncSession = Depends(get_db_session),
+    session: SessionDep = None,
 ):
+    if session is None:
+        raise ValueError(SESSION_ERR_MSG)
     status = validate_status(status)
     query = select(func.count(TradeRecord.id))
     if symbol:
@@ -303,7 +312,7 @@ async def get_strategies():
     return strategy_info
 
 
-@router.patch("/strategies/{strategy_id}/toggle")
+@router.patch("/strategies/{strategy_id}/toggle", responses={404: {"description": "Strategy not found"}})
 async def toggle_strategy(request: Request, strategy_id: str):
     rate_limit(request, max_calls=20, window_secs=60)
     validate_strategy_id(strategy_id)
@@ -320,8 +329,11 @@ async def toggle_strategy(request: Request, strategy_id: str):
 
 
 @router.get("/analytics/pnl-chart")
-async def get_pnl_chart_data(days: int = Query(default=30, ge=1, le=365), session: AsyncSession = Depends(get_db_session)):
-    since = datetime.utcnow() - timedelta(days=days)
+async def get_pnl_chart_data(days: int = Query(default=30, ge=1, le=365), session: SessionDep = None):
+    if session is None:
+        raise ValueError(SESSION_ERR_MSG)
+    from datetime import timezone
+    since = datetime.now(timezone.utc) - timedelta(days=days)
     is_paper = trading_engine.paper_trading
     base_filter = and_(TradeRecord.status == "closed", TradeRecord.is_paper_trade == is_paper)
     # Bug #6: Fetch historical PnL before the window as equity baseline so chart
@@ -370,7 +382,7 @@ async def get_funding_rates():
 
 
 @router.get("/analytics/ml-training-data")
-async def get_ml_training_data(session: AsyncSession = Depends(get_db_session)):
+async def get_ml_training_data(session: SessionDep):
     """
     Export all closed trades with their signal_features as a flat dataset
     ready for XGBoost/LightGBM training (Phase 3 of the AI roadmap).
@@ -384,6 +396,9 @@ async def get_ml_training_data(session: AsyncSession = Depends(get_db_session)):
         select(TradeRecord)
         .where(TradeRecord.status == "closed")
         .where(TradeRecord.signal_features.is_not(None))
+        # Never mix paper and live trades in one training dataset — their
+        # fill quality and slippage characteristics are different populations
+        .where(TradeRecord.is_paper_trade == trading_engine.paper_trading)
         .order_by(TradeRecord.closed_at)
     )
     trades = result.scalars().all()
@@ -428,6 +443,22 @@ async def get_ml_training_data(session: AsyncSession = Depends(get_db_session)):
     }
 
 
+@router.get("/ml/status")
+async def get_ml_status():
+    """Status of the adaptive ML signal filter: model metadata, threshold, retrain counters."""
+    return trading_engine.ml_filter.status()
+
+
+@router.post("/ml/retrain", responses={409: {"description": "Retrain already in progress"}})
+async def trigger_ml_retrain(request: Request):
+    """Manually trigger a background retrain of the ML win-probability model."""
+    rate_limit(request, max_calls=2, window_secs=300)
+    if trading_engine.ml_filter._retraining:
+        raise HTTPException(status_code=409, detail="Retrain already in progress")
+    await trading_engine.ml_filter.retrain_async()
+    return {"message": "Retrain finished", "status": trading_engine.ml_filter.status()}
+
+
 @router.get("/analytics/live-performance")
 async def get_live_performance():
     """Rolling Sharpe ratio, Kelly fraction, and dynamic weight per strategy — live from the engine."""
@@ -441,7 +472,7 @@ async def get_regime_info():
 
 
 @router.get("/analytics/strategy-performance")
-async def get_strategy_performance(session: AsyncSession = Depends(get_db_session)):
+async def get_strategy_performance(session: SessionDep):
     is_paper = trading_engine.paper_trading
     # Fetch raw joined labels — split on " + " and credit each base strategy individually
     rows = await session.execute(
