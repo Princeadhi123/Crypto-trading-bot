@@ -53,6 +53,7 @@ frontend/.cache/
 
 # ─── IDE & Editor ─────────────────────────────────────────────────────────────
 .vscode/
+.vexp
 .idea/
 *.swp
 *.swo
