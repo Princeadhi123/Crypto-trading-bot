@@ -40,6 +40,10 @@ export const botApi = {
   getVarReport: () => apiClient.get('/analytics/var'),
   getSentiment: () => apiClient.get('/analytics/sentiment'),
   getFundingRates: () => apiClient.get('/analytics/funding-rates'),
+  runBacktest: (config) => apiClient.post('/backtest/run', config),
+  getBacktestJobs: () => apiClient.get('/backtest/jobs'),
+  getBacktestJob: (jobId) => apiClient.get(`/backtest/jobs/${jobId}`),
+  applyBacktestWinner: (jobId) => apiClient.post(`/backtest/apply/${jobId}`),
 }
 
 export default apiClient

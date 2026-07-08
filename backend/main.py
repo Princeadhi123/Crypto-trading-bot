@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 from typing import Optional, Set
 
@@ -24,6 +25,12 @@ load_dotenv()
 
 if os.name == "nt":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+# Default GIL switch interval (5ms) lets CPU-heavy background jobs (e.g. the
+# backtest engine running in a thread-pool executor) hog the interpreter long
+# enough to visibly stall the main event loop's API requests. Lowering this
+# makes the scheduler check in far more often, keeping the API responsive.
+sys.setswitchinterval(0.001)
 
 logging.basicConfig(
     level=logging.INFO,

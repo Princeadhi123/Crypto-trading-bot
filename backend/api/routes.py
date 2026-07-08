@@ -8,6 +8,7 @@ from sqlalchemy import select, func, desc, and_, Integer, case
 from models.database import get_db_session, TradeRecord, BotSettings
 from models.schemas import BotSettingsSchema, TradeRecordSchema
 from engine.trading_engine import trading_engine, STRATEGY_REGISTRY, HFT_STRATEGY_REGISTRY
+from engine.backtester import BacktestConfig, BacktestJobManager
 from api.auth import require_auth, rate_limit, validate_symbol, validate_status, validate_strategy_id
 
 logger = logging.getLogger(__name__)
@@ -505,3 +506,90 @@ async def get_strategy_performance(session: SessionDep):
             "total_pnl": round(stats["total_pnl"], 2),
         })
     return result_list
+
+
+# ── Backtesting ─────────────────────────────────────────────────────────
+backtest_manager = BacktestJobManager(STRATEGY_REGISTRY)
+
+
+@router.post("/backtest/run", responses={400: {"description": "Invalid strategies or mode"}})
+async def run_backtest(request: Request, payload: dict):
+    """
+    Launch a backtest job in the background.
+    mode: 'solo' (single strategy), 'ensemble' (flat-weight voting),
+          'adaptive' (regime-routed weights, same as live engine),
+          'compare' (runs every strategy solo + ensemble + adaptive and ranks them).
+    """
+    rate_limit(request, max_calls=5, window_secs=60)
+    symbols = [validate_symbol(s) for s in payload.get("symbols", ["BTC/USDT"])]
+    strategies = payload.get("strategies") or list(STRATEGY_REGISTRY.keys())
+    strategies = [s for s in strategies if s in STRATEGY_REGISTRY and s != "pairs"]
+    if not strategies:
+        raise HTTPException(status_code=400, detail="No valid strategies selected")
+    mode = payload.get("mode", "adaptive")
+    if mode not in ("solo", "ensemble", "adaptive", "compare"):
+        raise HTTPException(status_code=400, detail="Invalid mode")
+    config = BacktestConfig(
+        symbols=symbols,
+        days=max(1, min(int(payload.get("days", 30)), 365)),
+        timeframe=payload.get("timeframe", "5m"),
+        strategies=strategies,
+        mode=mode,
+        initial_balance=float(payload.get("initial_balance", 10000.0)),
+        risk_per_trade_pct=float(payload.get("risk_per_trade_pct", 1.0)),
+        fee_rate=float(payload.get("fee_rate", 0.001)),
+        slippage_bps=float(payload.get("slippage_bps", 5.0)),
+        max_positions=int(payload.get("max_positions", 5)),
+        min_confidence=float(payload.get("min_confidence", 0.45)),
+    )
+    job_id = await backtest_manager.start(config)
+    return {"job_id": job_id, "message": "Backtest started"}
+
+
+@router.get("/backtest/jobs")
+async def list_backtest_jobs():
+    """All backtest jobs (without heavy result payloads)."""
+    return backtest_manager.list_jobs()
+
+
+@router.get("/backtest/jobs/{job_id}", responses={404: {"description": "Job not found"}})
+async def get_backtest_job(job_id: str):
+    """Full job detail including results when completed."""
+    job = backtest_manager.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+@router.post("/backtest/apply/{job_id}", responses={404: {"description": "Job not found"}, 400: {"description": "Job not completed"}})
+async def apply_backtest_winner(request: Request, job_id: str, session: SessionDep):
+    """
+    Apply the best-performing configuration from a 'compare' backtest to the
+    live/paper settings: enables the winning strategy set for paper trading.
+    """
+    rate_limit(request, max_calls=5, window_secs=60)
+    job = backtest_manager.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job["status"] != "completed" or not job.get("result"):
+        raise HTTPException(status_code=400, detail="Job not completed")
+    result = job["result"]
+    if result.get("mode") == "compare":
+        best = result.get("best")
+        if best in ("ensemble", "adaptive"):
+            winning_strategies = job["config"]["strategies"]
+        else:
+            winning_strategies = [best]
+    else:
+        winning_strategies = job["config"]["strategies"]
+    settings = await _get_or_create_settings(session)
+    settings.active_strategies = ",".join(winning_strategies)
+    await session.commit()
+    hot_reload = {}
+    if trading_engine.is_running:
+        hot_reload = trading_engine.apply_settings(_settings_row_to_dict(settings))
+    return {
+        "message": f"Applied strategies: {', '.join(winning_strategies)}",
+        "active_strategies": winning_strategies,
+        **hot_reload,
+    }

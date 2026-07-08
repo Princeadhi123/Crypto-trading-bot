@@ -2,7 +2,7 @@ import React, { useState, useCallback } from 'react'
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom'
 import {
   LayoutDashboard, TrendingUp, Briefcase, History,
-  Settings, Zap, BarChart3, Circle, Radio, LogOut
+  Settings, Zap, BarChart3, Circle, Radio, LogOut, FlaskConical
 } from 'lucide-react'
 import { useWebSocket } from './hooks/useWebSocket'
 import Dashboard from './pages/Dashboard'
@@ -11,8 +11,9 @@ import Portfolio from './pages/Portfolio'
 import Trades from './pages/Trades'
 import SettingsPage from './pages/SettingsPage'
 import Analytics from './pages/Analytics'
+import Backtest from './pages/Backtest'
 import LoginPage from './pages/LoginPage'
-import { needsLogin, clearAuthToken, isAuthenticated } from './auth'
+import { clearAuthToken, isAuthenticated } from './auth'
 
 const NAV_GROUPS = [
   {
@@ -33,6 +34,7 @@ const NAV_GROUPS = [
     label: 'Intelligence',
     items: [
       { path: '/analytics', label: 'Inst. Analytics', icon: BarChart3 },
+      { path: '/backtest', label: 'Backtesting Lab', icon: FlaskConical },
     ],
   },
   {
@@ -176,6 +178,7 @@ export default function App() {
             <Route path="/portfolio" element={<Portfolio wsEvents={wsEvents} />} />
             <Route path="/trades" element={<Trades />} />
             <Route path="/analytics" element={<Analytics wsEvents={wsEvents} />} />
+            <Route path="/backtest" element={<Backtest />} />
             <Route path="/settings" element={<SettingsPage />} />
           </Routes>
         </main>

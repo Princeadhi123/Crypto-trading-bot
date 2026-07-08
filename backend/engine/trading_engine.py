@@ -2,7 +2,8 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from typing import Optional
 import ccxt.async_support as ccxt
 import pandas as pd
@@ -27,6 +28,8 @@ logger = logging.getLogger(__name__)
 
 TRADE_FEE_RATE = 0.001
 TWAP_THRESHOLD_PCT = 0.02
+BTC_USDT = "BTC/USDT"
+ETH_USDT = "ETH/USDT"
 
 STRATEGY_REGISTRY = {
     "rsi": RsiStrategy(),
@@ -105,7 +108,7 @@ class ActivePosition:
         self.highest_price = entry_price
         self.lowest_price = entry_price
         self.trailing_stop_activated = False
-        self.opened_at = datetime.utcnow()
+        self.opened_at = datetime.now(timezone.utc)
 
     @property
     def unrealized_pnl(self) -> float:
@@ -139,7 +142,7 @@ class TradingEngine:
         self.current_sentiment: Optional[dict] = None
         self.last_var_report: Optional[dict] = None
         self.hft_mode: bool = False
-        self.active_symbols: list[str] = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT"]
+        self.active_symbols: list[str] = [BTC_USDT, ETH_USDT, "BNB/USDT", "SOL/USDT"]
         self.active_strategy_names: list[str] = ["rsi", "macd", "bollinger"]
         self.total_realized_pnl = 0.0
         self.total_trades_today = 0
@@ -156,6 +159,9 @@ class TradingEngine:
         self._main_loop_task: Optional[asyncio.Task] = None
         self._price_stream_task: Optional[asyncio.Task] = None
         self._broadcast_callback = None
+        # Thread pool for CPU-bound work (strategy computations, regime analysis, ML inference)
+        # to prevent blocking the main event loop during trading iterations
+        self._cpu_executor: Optional[ThreadPoolExecutor] = None
         # Public (keyless) exchange client for market data — lets paper trading run
         # on REAL candles instead of simulated random walks (which produced
         # meaningless training data and unrealistic signals)
@@ -234,8 +240,8 @@ class TradingEngine:
             self.funding_rate_signal.set_exchange(self.exchange)
             logger.info("Exchange %s initialized", exchange_name)
             return True
-        except Exception as exc:
-            logger.error("Exchange init failed: %s", exc)
+        except Exception:
+            logger.exception("Exchange init failed")
             return False
 
     def get_var_report(self) -> dict:
@@ -313,7 +319,7 @@ class TradingEngine:
     def _generate_simulated_ohlcv(self, symbol: str) -> pd.DataFrame:
         import numpy as np
         fallback_prices = {
-            "BTC/USDT": 65000.0, "ETH/USDT": 3500.0, "BNB/USDT": 600.0,
+            BTC_USDT: 65000.0, ETH_USDT: 3500.0, "BNB/USDT": 600.0,
             "SOL/USDT": 180.0, "DOGE/USDT": 0.15, "XRP/USDT": 0.60,
             "MATIC/USDT": 0.85, "AVAX/USDT": 38.0,
         }
@@ -343,7 +349,7 @@ class TradingEngine:
             change = rng.normal(0, volatility)
             closes.append(closes[-1] * (1 + change))
 
-        timestamps = pd.date_range(end=datetime.utcnow(), periods=OHLCV_LIMIT, freq=candle_freq)
+        timestamps = pd.date_range(end=datetime.now(timezone.utc), periods=OHLCV_LIMIT, freq=candle_freq)
         rows = []
         for i, close_price in enumerate(closes):
             spread = close_price * (0.001 if self.hft_mode else 0.002)
@@ -361,13 +367,13 @@ class TradingEngine:
 
     def _simulate_next_candle(self, last_close: float) -> dict:
         import numpy as np
-        rng = np.random.default_rng()
+        rng = np.random.default_rng(42)
         volatility = 0.002 if self.hft_mode else 0.006
         change = rng.normal(0, volatility)
         new_close = last_close * (1 + change)
         spread = new_close * (0.0005 if self.hft_mode else 0.002)
         return {
-            "timestamp": datetime.utcnow(),
+            "timestamp": datetime.now(timezone.utc),
             "open": last_close,
             "high": new_close + abs(rng.normal(0, spread)),
             "low": new_close - abs(rng.normal(0, spread)),
@@ -395,16 +401,10 @@ class TradingEngine:
             pass
         return None
 
-    async def _run_ensemble_for_symbol(self, symbol: str):
-        ohlcv_data = await self._fetch_ohlcv(symbol)
-        if ohlcv_data is None:
-            return None
-        # Only update market_prices from OHLCV in live mode
-        # In paper mode, preserve live prices from background refresh loop
-        if not self.paper_trading:
-            self.market_prices[symbol] = float(ohlcv_data["close"].iloc[-1])
+    def _compute_signals_cpu_bound(self, symbol: str, ohlcv_data: pd.DataFrame) -> tuple:
+        """CPU-bound signal computation: regime analysis, strategy signals, ensemble aggregation.
+        Runs in thread pool to avoid blocking the main event loop."""
         regime_analysis = self.regime_detector.analyze(ohlcv_data)
-        self.current_regimes[symbol] = regime_analysis.regime.value
         regime_weights = self.regime_detector.get_strategy_weights(regime_analysis)
         combined_weights = self.performance_tracker.get_combined_weights(regime_weights)
         raw_signals = []
@@ -417,18 +417,38 @@ class TradingEngine:
                     sig = strategy.compute_signal(symbol, ohlcv_data)
                     if sig:
                         raw_signals.append(sig)
-                        self.total_signals_today += 1
-                except Exception as exc:
-                    logger.error("Strategy %s error on %s: %s", strategy_name, symbol, exc)
+                except Exception:
+                    logger.exception("Strategy %s error on %s", strategy_name, symbol)
         if not raw_signals:
-            return None
-
-        # Reuse self.signal_ensemble which is already configured with HFT-aware
-        # parameters in start() — avoids creating a new object on every tick
+            return None, None, None
         ensemble_signal = self.signal_ensemble.aggregate(
             symbol=symbol, raw_signals=raw_signals,
             strategy_weights=combined_weights, regime_analysis=regime_analysis,
         )
+        return ensemble_signal, regime_analysis, len(raw_signals)
+
+    async def _run_ensemble_for_symbol(self, symbol: str):
+        ohlcv_data = await self._fetch_ohlcv(symbol)
+        if ohlcv_data is None:
+            return None
+        # The background _live_price_refresh_loop (main.py) already keeps
+        # market_prices fresh every 3s from live tickers, regardless of
+        # paper/live mode — only fall back to the (up to _loop_interval-old)
+        # OHLCV candle close if no live ticker price has arrived yet, so we
+        # never regress a fresh price back to a stale one.
+        existing_price = self.market_prices.get(symbol)
+        if not existing_price or existing_price <= 0:
+            self.market_prices[symbol] = float(ohlcv_data["close"].iloc[-1])
+        # Offload CPU-bound work (regime analysis, strategy computations, ensemble aggregation)
+        # to thread pool to prevent blocking the main event loop
+        loop = asyncio.get_running_loop()
+        ensemble_signal, regime_analysis, signal_count = await loop.run_in_executor(
+            self._cpu_executor, self._compute_signals_cpu_bound, symbol, ohlcv_data
+        )
+        if ensemble_signal is None:
+            return None
+        self.current_regimes[symbol] = regime_analysis.regime.value
+        self.total_signals_today += signal_count
         if ensemble_signal:
             logger.info("%s Ensemble %s %s conf=%.3f regime=%s agreed=%s",
                 "[HFT]" if self.hft_mode else "",
@@ -502,7 +522,7 @@ class TradingEngine:
                     regime=es.regime, regime_boost=es.regime_boost,
                     raw_signals=es.raw_signals,
                 )
-        open_symbols = list(self.active_positions.keys())
+        open_symbols = self.active_positions.keys()
         portfolio_value = self._compute_portfolio_value()
         self.risk_manager.update_peak_portfolio_value(portfolio_value)
         best_kelly = max((self.performance_tracker.get_kelly_fraction(s.strategy_name)
@@ -630,8 +650,8 @@ class TradingEngine:
                     regime=es.regime, regime_boost=es.regime_boost,
                     raw_signals=es.raw_signals,
                 )
-            except Exception as exc:
-                logger.error("Live order submission failed for %s: %s", es.symbol, exc)
+            except Exception:
+                logger.exception("Live order submission failed for %s", es.symbol)
                 return
         label = " + ".join(es.agreeing_strategies)
 
@@ -819,12 +839,12 @@ class TradingEngine:
                                     .values(quantity=remaining_qty)
                                 )
                                 await _s.commit()
-                        except Exception as _db_exc:
-                            logger.error("Failed to sync partial fill qty for %s: %s", symbol, _db_exc)
+                        except Exception:
+                            logger.exception("Failed to sync partial fill qty for %s", symbol)
                     return
                 self.active_positions.pop(symbol)
-            except Exception as exc:
-                logger.error("Live close order failed for %s: %s — position remains active", symbol, exc)
+            except Exception:
+                logger.exception("Live close order failed for %s — position remains active", symbol)
                 return
         else:
             self.active_positions.pop(symbol)
@@ -860,7 +880,7 @@ class TradingEngine:
                     profit_loss=round(pnl, 4),
                     profit_loss_percent=round(pnl_percent, 4),
                     status="closed",
-                    closed_at=datetime.utcnow(),
+                    closed_at=datetime.now(timezone.utc),
                     exit_reason=reason,
                 )
             )
@@ -889,6 +909,56 @@ class TradingEngine:
             "reason": reason,
         })
 
+    def _compute_pairs_signal_cpu_bound(self, btc_df: pd.DataFrame, eth_df: pd.DataFrame, pairs_strategy) -> tuple:
+        """CPU-bound pairs signal computation: strategy signal, regime analysis, hedge leg construction.
+        Runs in thread pool to avoid blocking the main event loop."""
+        try:
+            signal = pairs_strategy.compute_signal_from_pair(BTC_USDT, btc_df, eth_df)
+        except Exception:
+            logger.exception("Pairs strategy error")
+            return None, None, None
+        if signal is None:
+            return None, None, None
+        regime_analysis = self.regime_detector.analyze(btc_df)
+        btc_signal = EnsembleSignal(
+            symbol=BTC_USDT,
+            direction=signal.signal_type,
+            composite_confidence=signal.strength,
+            agreeing_strategies=["Statistical Arbitrage"],
+            disagreeing_strategies=[],
+            weighted_entry_price=signal.price,
+            suggested_stop_loss=signal.suggested_stop_loss,
+            suggested_take_profit=signal.suggested_take_profit,
+            regime=regime_analysis.regime,
+            regime_boost=1.0,
+            raw_signals=[signal],
+        )
+        # Build the ETH hedge leg (opposite direction = delta-neutral)
+        hedge_dir = "SELL" if signal.signal_type == "BUY" else "BUY"
+        eth_price = float(eth_df["close"].iloc[-1])
+        sl_pct = abs(signal.price - signal.suggested_stop_loss) / signal.price if signal.price > 0 else 0.02
+        tp_pct = abs(signal.suggested_take_profit - signal.price) / signal.price if signal.price > 0 else 0.04
+        if hedge_dir == "BUY":
+            eth_sl = eth_price * (1 - sl_pct)
+            eth_tp = eth_price * (1 + tp_pct)
+        else:
+            eth_sl = eth_price * (1 + sl_pct)
+            eth_tp = eth_price * (1 - tp_pct)
+        eth_signal = EnsembleSignal(
+            symbol=ETH_USDT,
+            direction=hedge_dir,
+            composite_confidence=signal.strength,
+            agreeing_strategies=["Statistical Arbitrage"],
+            disagreeing_strategies=[],
+            weighted_entry_price=round(eth_price, 8),
+            suggested_stop_loss=round(eth_sl, 8),
+            suggested_take_profit=round(eth_tp, 8),
+            regime=regime_analysis.regime,
+            regime_boost=1.0,
+            raw_signals=[signal],
+        )
+        return btc_signal, eth_signal, regime_analysis
+
     async def _run_pairs_signal(self) -> list["EnsembleSignal"]:
         """Runs Statistical Arbitrage on the BTC/ETH spread.
         Returns [btc_signal, eth_hedge_signal] for a delta-neutral pairs trade.
@@ -903,7 +973,7 @@ class TradingEngine:
         pairs_strategy = self._strategy_registry.get("pairs")
         if not pairs_strategy or not pairs_strategy.enabled:
             return []
-        btc_sym, eth_sym = "BTC/USDT", "ETH/USDT"
+        btc_sym, eth_sym = BTC_USDT, ETH_USDT
         if btc_sym not in self.active_symbols or eth_sym not in self.active_symbols:
             return []
         _btc_cached = self.ohlcv_cache.get(f"{btc_sym}_{self._active_timeframe}")
@@ -917,53 +987,16 @@ class TradingEngine:
         if not self.paper_trading:
             self.market_prices[btc_sym] = float(btc_df["close"].iloc[-1])
             self.market_prices[eth_sym] = float(eth_df["close"].iloc[-1])
-        try:
-            signal = pairs_strategy.compute_signal_from_pair(btc_sym, btc_df, eth_df)
-        except Exception as exc:
-            logger.error("Pairs strategy error: %s", exc)
-            return []
-        if signal is None:
+        # Offload CPU-bound work (strategy signal, regime analysis, hedge leg construction)
+        # to thread pool to prevent blocking the main event loop
+        loop = asyncio.get_running_loop()
+        btc_signal, eth_signal, regime_analysis = await loop.run_in_executor(
+            self._cpu_executor, self._compute_pairs_signal_cpu_bound, btc_df, eth_df, pairs_strategy
+        )
+        if btc_signal is None:
             return []
         self.total_signals_today += 1
-        regime_analysis = self.regime_detector.analyze(btc_df)
         self.current_regimes[btc_sym] = regime_analysis.regime.value
-        btc_signal = EnsembleSignal(
-            symbol=btc_sym,
-            direction=signal.signal_type,
-            composite_confidence=signal.strength,
-            agreeing_strategies=["Statistical Arbitrage"],
-            disagreeing_strategies=[],
-            weighted_entry_price=signal.price,
-            suggested_stop_loss=signal.suggested_stop_loss,
-            suggested_take_profit=signal.suggested_take_profit,
-            regime=regime_analysis.regime,
-            regime_boost=1.0,
-            raw_signals=[signal],
-        )
-        # Bug #3: Build the ETH hedge leg (opposite direction = delta-neutral)
-        hedge_dir = "SELL" if signal.signal_type == "BUY" else "BUY"
-        eth_price = float(eth_df["close"].iloc[-1])
-        sl_pct = abs(signal.price - signal.suggested_stop_loss) / signal.price if signal.price > 0 else 0.02
-        tp_pct = abs(signal.suggested_take_profit - signal.price) / signal.price if signal.price > 0 else 0.04
-        if hedge_dir == "BUY":
-            eth_sl = eth_price * (1 - sl_pct)
-            eth_tp = eth_price * (1 + tp_pct)
-        else:
-            eth_sl = eth_price * (1 + sl_pct)
-            eth_tp = eth_price * (1 - tp_pct)
-        eth_signal = EnsembleSignal(
-            symbol=eth_sym,
-            direction=hedge_dir,
-            composite_confidence=signal.strength,
-            agreeing_strategies=["Statistical Arbitrage"],
-            disagreeing_strategies=[],
-            weighted_entry_price=round(eth_price, 8),
-            suggested_stop_loss=round(eth_sl, 8),
-            suggested_take_profit=round(eth_tp, 8),
-            regime=regime_analysis.regime,
-            regime_boost=1.0,
-            raw_signals=[signal],
-        )
         return [btc_signal, eth_signal]
 
     def _compute_portfolio_value(self) -> float:
@@ -990,9 +1023,9 @@ class TradingEngine:
                 await self._check_exit_conditions()
                 await asyncio.sleep(EXIT_CHECK_INTERVAL_HFT)
             except asyncio.CancelledError:
-                break
-            except Exception as exc:
-                logger.error("Price stream error: %s", exc)
+                raise
+            except Exception:
+                logger.exception("Price stream error")
                 await asyncio.sleep(1)
         logger.info("Price stream loop stopped")
 
@@ -1021,7 +1054,7 @@ class TradingEngine:
         logger.info("Trading loop started [%s | %ds interval]", mode_label, self._loop_interval)
         while self.is_running:
             try:
-                self.last_tick = datetime.utcnow()
+                self.last_tick = datetime.now(timezone.utc)
 
                 # Refresh live exchange balance for accurate portfolio value and risk sizing
                 if not self.paper_trading and self.exchange is not None:
@@ -1052,7 +1085,7 @@ class TradingEngine:
                             stop_loss_price=primary.suggested_stop_loss,
                             signal_confidence=primary.final_confidence,
                             open_positions_count=len(self.active_positions),
-                            open_symbols=list(self.active_positions.keys()),
+                            open_symbols=self.active_positions.keys(),
                             symbol=primary.symbol, side=primary.direction, kelly_fraction=_kelly,
                         )
                         _hedges_ok = _pre.allowed and all(
@@ -1097,9 +1130,9 @@ class TradingEngine:
 
                 await asyncio.sleep(self._loop_interval)
             except asyncio.CancelledError:
-                break
-            except Exception as exc:
-                logger.error("Trading loop error: %s", exc)
+                raise
+            except Exception:
+                logger.exception("Trading loop error")
                 await asyncio.sleep(2 if self.hft_mode else 5)
 
         logger.info("Trading loop stopped")
@@ -1153,7 +1186,7 @@ class TradingEngine:
                 logger.info("Reloaded %d open position(s) from previous session", len(self.active_positions))
         except Exception as _exc:
             logger.warning("Could not reload open positions on start: %s", _exc)
-        self.active_symbols = settings.get("active_symbols", ["BTC/USDT", "ETH/USDT"])
+        self.active_symbols = settings.get("active_symbols", [BTC_USDT, ETH_USDT])
         self.active_strategy_names = settings.get("active_strategies", ["rsi", "macd"])
         self.hft_mode = settings.get("hft_mode", False)
         # Clear OHLCV cache when mode changes, but preserve live market prices
@@ -1169,6 +1202,9 @@ class TradingEngine:
             minimum_agreement_count=1 if self.hft_mode else 2,
             minimum_composite_confidence=0.45 if self.hft_mode else 0.55,
         )
+        # Initialize thread pool for CPU-bound work (strategy computations, regime analysis, ML inference)
+        # This prevents blocking the main event loop during trading iterations
+        self._cpu_executor = ThreadPoolExecutor(max_workers=4)
         self.is_running = True
         self.start_time = time.time()
         self._main_loop_task = asyncio.create_task(self._trading_loop())
@@ -1182,16 +1218,10 @@ class TradingEngine:
         self.is_running = False
         if self._price_stream_task:
             self._price_stream_task.cancel()
-            try:
-                await self._price_stream_task
-            except asyncio.CancelledError:
-                pass
+            await self._price_stream_task
         if self._main_loop_task:
             self._main_loop_task.cancel()
-            try:
-                await self._main_loop_task
-            except asyncio.CancelledError:
-                pass
+            await self._main_loop_task
         # Close any open positions in the DB so they're never stuck as 'open' forever
         if self.active_positions:
             # Bug #5: track which symbols exchange actually confirmed closed
@@ -1219,8 +1249,8 @@ class TradingEngine:
                         self.market_prices[_pos.symbol] = _px
                         exchange_closed.add(_pos.symbol)
                         logger.info("Stop: live close filled: %s %s @ %.4f", _side, _pos.symbol, _px)
-                    except Exception as _exc:
-                        logger.error("Stop: failed to close live position %s: %s — left open in DB", _pos.symbol, _exc)
+                    except Exception:
+                        logger.exception("Stop: failed to close live position %s — left open in DB", _pos.symbol)
             try:
                 async with AsyncSessionLocal() as session:
                     for pos in self.active_positions.values():
@@ -1250,7 +1280,7 @@ class TradingEngine:
                                 profit_loss=round(pnl, 4),
                                 profit_loss_percent=round(pnl_pct, 4),
                                 status="closed",
-                                closed_at=datetime.utcnow(),
+                                closed_at=datetime.now(timezone.utc),
                                 exit_reason="bot_stopped",
                             )
                         )
@@ -1263,8 +1293,8 @@ class TradingEngine:
                         )
                     await session.commit()
                 logger.info("Closed %d open position(s) on engine stop", len(self.active_positions))
-            except Exception as exc:
-                logger.error("Failed to close open positions on stop: %s", exc)
+            except Exception:
+                logger.exception("Failed to close open positions on stop")
             self.active_positions.clear()
         # Clear recent signals so stale signals from previous session don't persist
         self.recent_signals.clear()
@@ -1276,6 +1306,10 @@ class TradingEngine:
             except Exception:
                 pass
             self._public_data_exchange = None
+        # Shutdown thread pool for CPU-bound work
+        if self._cpu_executor is not None:
+            self._cpu_executor.shutdown(wait=True)
+            self._cpu_executor = None
         await close_public_futures_exchange()
         logger.info("Trading engine stopped")
 
@@ -1300,7 +1334,7 @@ class TradingEngine:
         # --- Safe to hot-reload: active strategies ---
         new_strategies = settings.get("active_strategies", self.active_strategy_names)
         if set(new_strategies) != set(self.active_strategy_names):
-            self.active_strategy_names = list(new_strategies)
+            self.active_strategy_names = new_strategies
             applied.append("active_strategies")
 
         # --- Safe to hot-reload: active symbols (only add new ones; keep existing positions) ---
@@ -1313,7 +1347,7 @@ class TradingEngine:
                 for cache_key in [k for k in list(self.ohlcv_cache.keys()) if k.startswith(f"{sym}_")]:
                     self.ohlcv_cache.pop(cache_key, None)
                     self._ohlcv_cache_time.pop(cache_key, None)
-            self.active_symbols = list(new_symbols)
+            self.active_symbols = new_symbols
             applied.append("active_symbols")
 
         # --- NOT safe while running: mode changes ---

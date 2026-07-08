@@ -1,13 +1,43 @@
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 import httpx
 
 logger = logging.getLogger(__name__)
 
 FEAR_GREED_API_URL = "https://api.alternative.me/fng/?limit=1&format=json"
+
+CLASSIFICATION_THRESHOLDS = [
+    (0, 24, "Extreme Fear", "BUY_ONLY"),
+    (25, 44, "Fear", "BUY_ONLY"),
+    (45, 55, "Neutral", "BOTH"),
+    (56, 74, "Greed", "SELL_ONLY"),
+    (75, 100, "Extreme Greed", "SELL_ONLY"),
+]
+
+
+def classify_value(value: int) -> tuple[str, str]:
+    """Single source of truth for Fear & Greed classification — reused by the
+    live SentimentFilter and the backtester so both apply identical rules."""
+    for low, high, classification, bias in CLASSIFICATION_THRESHOLDS:
+        if low <= value <= high:
+            return classification, bias
+    return "Neutral", "BOTH"
+
+
+def is_direction_allowed(bias: str, direction: str) -> bool:
+    """Returns True if a signal direction is compatible with a trading bias."""
+    if bias == "BOTH":
+        return True
+    if bias == "NONE":
+        return False
+    if bias == "BUY_ONLY":
+        return direction == "BUY"
+    if bias == "SELL_ONLY":
+        return direction == "SELL"
+    return True
 
 
 @dataclass
@@ -38,14 +68,6 @@ class SentimentFilter:
     market momentum, social media, surveys, Bitcoin dominance, and Google trends.
     """
 
-    CLASSIFICATION_THRESHOLDS = [
-        (0, 24, "Extreme Fear", "BUY_ONLY"),
-        (25, 44, "Fear", "BUY_ONLY"),
-        (45, 55, "Neutral", "BOTH"),
-        (56, 74, "Greed", "SELL_ONLY"),
-        (75, 100, "Extreme Greed", "SELL_ONLY"),
-    ]
-
     def __init__(
         self,
         cache_ttl_minutes: int = 30,
@@ -60,13 +82,10 @@ class SentimentFilter:
         self._fallback_value = 50  # Neutral if API unavailable
 
     def _classify(self, value: int) -> tuple[str, str]:
-        for low, high, classification, bias in self.CLASSIFICATION_THRESHOLDS:
-            if low <= value <= high:
-                return classification, bias
-        return "Neutral", "BOTH"
+        return classify_value(value)
 
     async def fetch_current_sentiment(self) -> SentimentReading:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         if (self._cached_reading is not None and self._last_fetch is not None and
                 (now - self._last_fetch).total_seconds() < self.cache_ttl_minutes * 60):
             return self._cached_reading
@@ -113,16 +132,7 @@ class SentimentFilter:
         Institutions call this the 'macro filter' — no matter how good a signal
         looks technically, you don't fight extreme market sentiment.
         """
-        bias = sentiment.trading_bias
-        if bias == "BOTH":
-            return True
-        if bias == "NONE":
-            return False
-        if bias == "BUY_ONLY":
-            return signal_direction == "BUY"
-        if bias == "SELL_ONLY":
-            return signal_direction == "SELL"
-        return True
+        return is_direction_allowed(sentiment.trading_bias, signal_direction)
 
     def get_confidence_adjustment(self, sentiment: SentimentReading, signal_direction: str = "BUY") -> float:
         """

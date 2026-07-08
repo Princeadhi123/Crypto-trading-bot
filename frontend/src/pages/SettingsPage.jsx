@@ -113,7 +113,7 @@ export default function SettingsPage() {
   }
 
   return (
-    <div className="p-6 space-y-5 max-w-3xl animate-fade-in">
+    <div className="p-6 space-y-5 animate-fade-in">
       <PageHeader
         title="Settings"
         subtitle="Configure your trading bot parameters and risk rules"

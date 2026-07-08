@@ -133,7 +133,7 @@ class MLSignalFilter:
                 logger.warning("ML filter: retrain skipped/failed: %s", result.get("message"))
         except Exception as exc:
             self._last_error = str(exc)
-            logger.error("ML filter: retrain crashed: %s", exc)
+            logger.exception("ML filter: retrain crashed")
         finally:
             self._retraining = False
 
