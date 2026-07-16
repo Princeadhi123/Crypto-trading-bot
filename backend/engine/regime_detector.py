@@ -63,10 +63,10 @@ class MarketRegimeDetector:
         atr = self._compute_atr(highs, lows, closes)
         atr_safe = atr.replace(0, np.nan)
 
-        plus_di = 100 * pd.Series(plus_dm, index=highs.index).ewm(
-            span=self.adx_period, adjust=False).mean() / atr_safe
-        minus_di = 100 * pd.Series(minus_dm, index=highs.index).ewm(
-            span=self.adx_period, adjust=False).mean() / atr_safe
+        plus_di = pd.Series(plus_dm, index=highs.index).ewm(
+            span=self.adx_period, adjust=False).mean().divide(atr_safe).multiply(100.0)
+        minus_di = pd.Series(minus_dm, index=highs.index).ewm(
+            span=self.adx_period, adjust=False).mean().divide(atr_safe).multiply(100.0)
 
         di_sum = plus_di + minus_di
         dx = (100 * (plus_di - minus_di).abs() / di_sum.replace(0, np.nan)).fillna(0)

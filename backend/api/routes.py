@@ -240,7 +240,7 @@ async def get_active_positions():
 
 
 @router.post("/positions/close")
-async def close_position_manually(request: Request, symbol: str = Query(...)):
+async def close_position_manually(request: Request, symbol: Annotated[str, Query()]):
     """Manually close an open position at current market price"""
     rate_limit(request, max_calls=20, window_secs=60)
     symbol = validate_symbol(symbol)
@@ -250,10 +250,10 @@ async def close_position_manually(request: Request, symbol: str = Query(...)):
 
 @router.get("/trades")
 async def get_trade_history(
-    limit: int = Query(default=50, ge=1, le=500),
-    offset: int = Query(default=0, ge=0),
-    symbol: Optional[str] = Query(default=None, max_length=20),
-    status: Optional[str] = Query(default=None),
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    symbol: Annotated[Optional[str], Query(max_length=20)] = None,
+    status: Annotated[Optional[str], Query()] = None,
     session: SessionDep = None,
 ):
     if session is None:
@@ -273,8 +273,8 @@ async def get_trade_history(
 
 @router.get("/trades/count")
 async def get_trade_count(
-    symbol: Optional[str] = Query(default=None, max_length=20),
-    status: Optional[str] = Query(default=None),
+    symbol: Annotated[Optional[str], Query(max_length=20)] = None,
+    status: Annotated[Optional[str], Query()] = None,
     session: SessionDep = None,
 ):
     if session is None:
@@ -330,7 +330,10 @@ async def toggle_strategy(request: Request, strategy_id: str):
 
 
 @router.get("/analytics/pnl-chart")
-async def get_pnl_chart_data(days: int = Query(default=30, ge=1, le=365), session: SessionDep = None):
+async def get_pnl_chart_data(
+    days: Annotated[int, Query(ge=1, le=365)] = 30,
+    session: SessionDep = None,
+):
     if session is None:
         raise ValueError(SESSION_ERR_MSG)
     from datetime import timezone

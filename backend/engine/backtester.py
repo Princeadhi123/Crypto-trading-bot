@@ -42,6 +42,7 @@ WINDOW_CANDLES = 150          # lookback fed to strategies each step
 CANDLES_PER_YEAR = {"1m": 525600, "5m": 105120, "15m": 35040, "1h": 8760, "4h": 2190, "1d": 365}
 PAIRS_PRIMARY_SYMBOL = "BTC/USDT"
 PAIRS_HEDGE_SYMBOL = "ETH/USDT"
+PAIRS_STRATEGY_LABEL = "Statistical Arbitrage"
 
 
 @dataclass
@@ -140,7 +141,6 @@ class Backtester:
         the same constant simulated rate the live engine uses when unavailable,
         so the filter always applies exactly like production (fail-open parity)."""
         import ccxt
-        result: dict[str, dict[str, float]] = {}
         exchange = None
         try:
             exchange = ccxt.binance({"options": {"defaultType": "swap"}, "enableRateLimit": True})
@@ -148,23 +148,35 @@ class Backtester:
             logger.warning("Could not init futures exchange for funding history: %s", exc)
 
         since = exchange.milliseconds() - days * 24 * 60 * 60 * 1000 if exchange else None
-        for sym in symbols:
-            perp_symbol = PERPETUAL_SYMBOL_MAP.get(sym)
-            history: dict[str, float] = {}
-            if exchange is not None and perp_symbol:
-                try:
-                    rows = exchange.fetch_funding_rate_history(perp_symbol, since=since, limit=1000)
-                    for row in rows:
-                        ts = datetime.fromtimestamp(row["timestamp"] / 1000, tz=timezone.utc)
-                        history[ts.strftime("%Y-%m-%d")] = float(row["fundingRate"])
-                except Exception as exc:
-                    logger.debug("Funding history fetch failed for %s: %s", sym, exc)
-            if not history:
-                fallback_rate = SIMULATED_FUNDING_RATES.get(sym)
-                if fallback_rate is not None:
-                    history = {"__constant__": fallback_rate}
-            result[sym] = history
-        return result
+        return {
+            sym: Backtester._funding_history_for_symbol(exchange, sym, since)
+            for sym in symbols
+        }
+
+    @staticmethod
+    def _funding_history_for_symbol(exchange: Any, sym: str, since: Optional[int]) -> dict[str, float]:
+        history = Backtester._fetch_exchange_funding_history(exchange, sym, since)
+        if history:
+            return history
+        fallback_rate = SIMULATED_FUNDING_RATES.get(sym)
+        return {"__constant__": fallback_rate} if fallback_rate is not None else {}
+
+    @staticmethod
+    def _fetch_exchange_funding_history(exchange: Any, sym: str,
+                                        since: Optional[int]) -> dict[str, float]:
+        perp_symbol = PERPETUAL_SYMBOL_MAP.get(sym)
+        if exchange is None or not perp_symbol:
+            return {}
+        try:
+            rows = exchange.fetch_funding_rate_history(perp_symbol, since=since, limit=1000)
+            return {
+                datetime.fromtimestamp(row["timestamp"] / 1000, tz=timezone.utc).strftime("%Y-%m-%d"):
+                    float(row["fundingRate"])
+                for row in rows
+            }
+        except Exception as exc:
+            logger.debug("Funding history fetch failed for %s: %s", sym, exc)
+            return {}
 
     # ── Signal generation per mode ──────────────────────────────────────
     def _signal_for_window(self, symbol: str, data: dict[str, pd.DataFrame], i: int, config: BacktestConfig,
@@ -237,280 +249,70 @@ class Backtester:
             risk_manager: Optional[RiskManager] = None,
             ml_filter: Optional[MLSignalFilter] = None,
             funding_history: Optional[dict[str, dict[str, float]]] = None) -> dict:
-        ensemble = SignalEnsemble(
-            minimum_agreement_count=1 if config.mode == "solo" else 2,
-            minimum_composite_confidence=config.min_confidence,
+        runtime = _BacktestRuntime(
+            self, config, data, strategy_names, progress_callback, sentiment_history,
+            risk_manager, ml_filter, funding_history,
         )
-        risk_manager = risk_manager or RiskManager()
-        performance_tracker = StrategyPerformanceTracker(rolling_window=30)
-        sentiment_helper = SentimentFilter()
-        funding_helper = FundingRateSignal()
-        balance = config.initial_balance
-        equity_curve: list[dict] = []
-        trades: list[dict] = []
-        open_positions: dict[str, SimPosition] = {}
-        slip = config.slippage_bps / 10000.0
-
-        effective_names = [n for n in strategy_names if n != "pairs"]
-        pairs_strategy = self._registry.get("pairs") if "pairs" in strategy_names else None
-        pairs_enabled = (
-            pairs_strategy is not None
-            and PAIRS_PRIMARY_SYMBOL in data
-            and PAIRS_HEDGE_SYMBOL in data
-        )
-
-        # Align all symbols to shortest history
-        min_len = min(len(df) for df in data.values())
-        total_steps = max(min_len - WINDOW_CANDLES - 1, 1)
-
-        def _portfolio_value(i: int) -> float:
-            unrealized = 0.0
-            for sym, pos in open_positions.items():
-                price = float(data[sym]["close"].iloc[i])
-                if pos.side == "BUY":
-                    unrealized += (price - pos.entry_price) * pos.quantity
-                else:
-                    unrealized += (pos.entry_price - price) * pos.quantity
-            return balance + unrealized
-
-        def _close(position: SimPosition, exit_price: float, reason: str, index: int, sym: str):
-            nonlocal balance
-            exit_fill = exit_price * (1 - slip) if position.side == "BUY" else exit_price * (1 + slip)
-            if position.side == "BUY":
-                pnl = (exit_fill - position.entry_price) * position.quantity
-            else:
-                pnl = (position.entry_price - exit_fill) * position.quantity
-            fees = (position.entry_price + exit_fill) * position.quantity * config.fee_rate
-            pnl -= fees
-            balance += pnl
-            cost = position.entry_price * position.quantity
-            pnl_percent = (pnl / cost * 100) if cost > 0 else 0.0
-            for name in position.strategy.split(" + "):
-                performance_tracker.record_trade_outcome(name.strip(), round(pnl_percent, 4))
-            trades.append({
-                "symbol": sym, "side": position.side, "strategy": position.strategy,
-                "regime": position.regime,
-                "entry_price": round(position.entry_price, 8), "exit_price": round(exit_fill, 8),
-                "quantity": round(position.quantity, 8), "pnl": round(pnl, 4),
-                "fees": round(fees, 4), "exit_reason": reason,
-                "held_candles": index - position.entry_index,
-                "opened_at": str(data[sym]["timestamp"].iloc[position.entry_index]),
-                "closed_at": str(data[sym]["timestamp"].iloc[index]),
-            })
-
-        def _sentiment_at(sym: str, i: int) -> tuple[Optional[int], str]:
-            if not sentiment_history:
-                return None, "BOTH"
-            date_str = pd.Timestamp(data[sym]["timestamp"].iloc[i]).strftime("%Y-%m-%d")
-            value = sentiment_history.get(date_str)
-            if value is None:
-                return None, "BOTH"
-            _, bias = classify_value(value)
-            return value, bias
-
-        def _funding_at(sym: str, i: int) -> Optional[tuple[float, str, float]]:
-            hist = funding_history.get(sym) if funding_history else None
-            if not hist:
-                return None
-            if "__constant__" in hist:
-                rate = hist["__constant__"]
-            else:
-                date_str = pd.Timestamp(data[sym]["timestamp"].iloc[i]).strftime("%Y-%m-%d")
-                rate = hist.get(date_str)
-                if rate is None:
-                    return None
-            bias, strength = funding_helper._interpret_funding(rate)
-            return rate, bias, strength
-
-        def _try_open(sym: str, direction: str, entry: float, stop: float, tp: float,
-                      confidence: float, label: str, regime: str, regime_boost: float,
-                      agreeing_count: int, disagreeing_count: int, i: int,
-                      forced_quantity: Optional[float] = None) -> Optional[SimPosition]:
-            nonlocal balance
-            # --- Sentiment macro filter (identical to live's macro gate) ---
-            sentiment_value, sentiment_bias = _sentiment_at(sym, i)
-            if sentiment_value is not None and not is_direction_allowed(sentiment_bias, direction):
-                return None
-            sentiment_conf_adj = 1.0
-            if sentiment_value is not None:
-                reading = SentimentReading(
-                    value=sentiment_value, classification="", timestamp=datetime.now(timezone.utc),
-                    trading_allowed=True, trading_bias=sentiment_bias, reason="",
-                )
-                sentiment_conf_adj = sentiment_helper.get_confidence_adjustment(reading, direction)
-
-            # --- Funding-rate filter ---
-            funding_tuple = _funding_at(sym, i)
-            funding_conf_adj = 1.0
-            if funding_tuple is not None:
-                rate, funding_bias, funding_strength = funding_tuple
-                freading = FundingRateReading(
-                    symbol=sym, funding_rate=rate, annualized_rate=0.0, signal_bias=funding_bias,
-                    signal_strength=funding_strength, timestamp=datetime.now(timezone.utc), is_simulated=False,
-                )
-                if not funding_helper.is_signal_aligned_with_funding(direction, freading):
-                    return None
-                funding_conf_adj = funding_helper.get_confidence_adjustment(direction, freading)
-
-            adjusted_confidence = min(confidence * sentiment_conf_adj * funding_conf_adj, 1.0)
-
-            # --- Reversal handling: close opposite position, no-op if same side already open ---
-            existing = open_positions.get(sym)
-            if existing is not None:
-                if existing.side != direction:
-                    _close(existing, entry, "reversal", i, sym)
-                    del open_positions[sym]
-                else:
-                    return None
-
-            if len(open_positions) >= config.max_positions:
-                return None
-
-            entry_fill = entry * (1 + slip) if direction == "BUY" else entry * (1 - slip)
-            portfolio_value = _portfolio_value(i)
-            risk_manager.update_peak_portfolio_value(portfolio_value)
-
-            best_kelly = max(
-                (performance_tracker.get_kelly_fraction(n.strip()) for n in label.split(" + ")),
-                default=0.02,
-            )
-            if forced_quantity is not None:
-                # Hedge legs bypass the risk gate to match the primary leg's USD
-                # value exactly — same as trading_engine._execute_ensemble_signal.
-                sizing = PositionSizeResult(
-                    allowed=True, quantity=forced_quantity,
-                    position_value=forced_quantity * entry_fill, risk_amount=0.0,
-                )
-            else:
-                sizing = risk_manager.calculate_position_size(
-                    portfolio_value=portfolio_value, entry_price=entry_fill, stop_loss_price=stop,
-                    signal_confidence=adjusted_confidence, open_positions_count=len(open_positions),
-                    open_symbols=list(open_positions.keys()), symbol=sym, side=direction,
-                    kelly_fraction=best_kelly, take_profit_price=tp,
-                )
-                if not sizing.allowed:
-                    return None
-
-            # --- ML adaptive filter (hedge legs bypass it, same as live) ---
-            if forced_quantity is None and ml_filter is not None:
-                stop_distance_pct = abs(entry_fill - stop) / entry_fill * 100 if entry_fill else 0.0
-                rr_ratio = abs(tp - entry_fill) / max(abs(entry_fill - stop), 1e-10)
-                features = {
-                    "symbol": sym, "direction": direction, "regime": regime,
-                    "ensemble_confidence": round(adjusted_confidence, 4),
-                    "regime_boost": regime_boost,
-                    "agreeing_strategies_count": agreeing_count,
-                    "disagreeing_strategies_count": disagreeing_count,
-                    "sentiment_value": sentiment_value if sentiment_value is not None else 50,
-                    "sentiment_bias": sentiment_bias,
-                    "funding_rate": funding_tuple[0] if funding_tuple else 0.0,
-                    "funding_bias": funding_tuple[1] if funding_tuple else "NEUTRAL",
-                    "kelly_fraction": round(best_kelly, 4),
-                    "stop_distance_pct": round(stop_distance_pct, 4),
-                    "risk_reward_ratio": round(rr_ratio, 3),
-                    "portfolio_drawdown_at_entry": round(
-                        risk_manager.compute_current_drawdown_percent(portfolio_value), 2),
-                    "open_positions_at_entry": len(open_positions),
-                    "hft_mode": False,
-                }
-                ml_probability = ml_filter.score(features)
-                if ml_probability is not None and ml_probability < ml_filter.min_win_probability:
-                    return None
-
-            position = SimPosition(
-                symbol=sym, side=direction, entry_price=entry_fill, quantity=sizing.quantity,
-                stop_loss=stop, take_profit=tp, entry_index=i, strategy=label, regime=regime,
-            )
-            open_positions[sym] = position
-            return position
-
-        for step, i in enumerate(range(WINDOW_CANDLES, min_len - 1)):
-            # 1) Check exits on all open positions
-            for sym in list(open_positions.keys()):
-                pos = open_positions[sym]
-                row = data[sym].iloc[i]
-                exit_hit = self._candle_exit(pos, float(row["high"]), float(row["low"]))
-                if exit_hit:
-                    _close(pos, exit_hit[0], exit_hit[1], i, sym)
-                    del open_positions[sym]
-                elif i - pos.entry_index >= config.max_hold_candles:
-                    _close(pos, float(row["close"]), "time_exit", i, sym)
-                    del open_positions[sym]
-
-            # 2) Look for entries — generic per-symbol ensemble/solo signals
-            if effective_names and len(open_positions) < config.max_positions:
-                for sym in data:
-                    if len(open_positions) >= config.max_positions:
-                        break
-                    result = self._signal_for_window(sym, data, i, config, effective_names, ensemble, performance_tracker)
-                    if result is None:
-                        continue
-                    _try_open(
-                        sym, result.direction, result.entry, result.stop, result.tp, result.confidence,
-                        result.label, result.regime, result.regime_boost,
-                        result.agreeing_count, result.disagreeing_count, i,
-                    )
-
-            # 2b) Statistical Arbitrage — dedicated delta-neutral BTC/ETH pairs trade,
-            # executed outside the ensemble exactly like the live engine's separate
-            # _run_pairs_signal() path (both legs must be attempted together).
-            if pairs_enabled and (config.max_positions - len(open_positions)) >= 2:
-                btc_window = data[PAIRS_PRIMARY_SYMBOL].iloc[i - WINDOW_CANDLES:i + 1].reset_index(drop=True)
-                eth_window = data[PAIRS_HEDGE_SYMBOL].iloc[i - WINDOW_CANDLES:i + 1].reset_index(drop=True)
-                try:
-                    sig = pairs_strategy.compute_signal_from_pair(PAIRS_PRIMARY_SYMBOL, btc_window, eth_window)
-                except Exception:
-                    sig = None
-                if sig:
-                    regime_value = self.regime_detector.analyze(btc_window).regime.value
-                    hedge_dir = "SELL" if sig.signal_type == "BUY" else "BUY"
-                    eth_price = float(eth_window["close"].iloc[-1])
-                    sl_pct = abs(sig.price - sig.suggested_stop_loss) / sig.price if sig.price > 0 else 0.02
-                    tp_pct = abs(sig.suggested_take_profit - sig.price) / sig.price if sig.price > 0 else 0.04
-                    if hedge_dir == "BUY":
-                        eth_sl, eth_tp = eth_price * (1 - sl_pct), eth_price * (1 + tp_pct)
-                    else:
-                        eth_sl, eth_tp = eth_price * (1 + sl_pct), eth_price * (1 - tp_pct)
-
-                    primary_pos = _try_open(
-                        PAIRS_PRIMARY_SYMBOL, sig.signal_type, sig.price, sig.suggested_stop_loss,
-                        sig.suggested_take_profit, sig.strength, "Statistical Arbitrage", regime_value,
-                        1.0, 1, 0, i,
-                    )
-                    if primary_pos is not None and eth_price > 0:
-                        forced_qty = round(primary_pos.quantity * primary_pos.entry_price / eth_price, 8)
-                        if forced_qty > 0:
-                            _try_open(
-                                PAIRS_HEDGE_SYMBOL, hedge_dir, eth_price, eth_sl, eth_tp,
-                                sig.strength, "Statistical Arbitrage", regime_value, 1.0, 1, 0, i,
-                                forced_quantity=forced_qty,
-                            )
-
-            # 3) Mark-to-market equity
-            equity_curve.append({
-                "timestamp": str(data[next(iter(data))]["timestamp"].iloc[i]),
-                "equity": round(_portfolio_value(i), 2),
-            })
-
-            if progress_callback and step % 200 == 0:
-                progress_callback(step / total_steps)
-            # Yield the GIL periodically so this CPU-heavy loop (running in a
-            # background thread) doesn't starve the main asyncio event loop —
-            # without this, other API requests (prices, status) stall while a
-            # backtest is running.
-            if step % 25 == 0:
-                time.sleep(0)
-
-        # Force-close leftovers at final close
-        last_i = min_len - 2
-        for sym in list(open_positions.keys()):
-            pos = open_positions[sym]
-            _close(pos, float(data[sym]["close"].iloc[last_i]), "end_of_backtest", last_i, sym)
-            del open_positions[sym]
-
-        return self._build_report(config, trades, equity_curve, strategy_names)
+        return runtime.run()
 
     # ── Metrics ─────────────────────────────────────────────────────────
+    @staticmethod
+    def _profit_factor(wins: list[dict], losses: list[dict]) -> float:
+        gross_profit = sum(t["pnl"] for t in wins)
+        gross_loss = abs(sum(t["pnl"] for t in losses))
+        if gross_loss > 0:
+            return gross_profit / gross_loss
+        if gross_profit > 0:
+            return math.inf
+        return 0.0
+
+    @staticmethod
+    def _risk_adjusted_metrics(equity_series: pd.Series, timeframe: str) -> tuple[float, float]:
+        returns = equity_series.pct_change().dropna()
+        periods_per_year = CANDLES_PER_YEAR.get(timeframe, 105120)
+        if len(returns) <= 2 or returns.std() <= 0:
+            return 0.0, 0.0
+        sharpe = float(returns.mean() / returns.std() * math.sqrt(periods_per_year))
+        downside = returns[returns < 0]
+        sortino = 0.0
+        if len(downside) > 1 and downside.std() > 0:
+            sortino = float(returns.mean() / downside.std() * math.sqrt(periods_per_year))
+        return sharpe, sortino
+
+    @staticmethod
+    def _trade_breakdown(trades: list[dict], field: str, split_labels: bool) -> dict[str, dict]:
+        breakdown: dict[str, dict] = {}
+        for trade in trades:
+            labels = trade[field].split(" + ") if split_labels else [trade[field]]
+            for label in labels:
+                key = label.strip()
+                summary = breakdown.setdefault(key, {"trades": 0, "wins": 0, "pnl": 0.0})
+                summary["trades"] += 1
+                summary["pnl"] += trade["pnl"]
+                if trade["pnl"] > 0:
+                    summary["wins"] += 1
+        return breakdown
+
+    @staticmethod
+    def _strategy_breakdown(trades: list[dict]) -> list[dict]:
+        per_strategy = Backtester._trade_breakdown(trades, "strategy", True)
+        return [
+            {"strategy": key, "trades": value["trades"], "wins": value["wins"],
+             "win_rate": round(value["wins"] / value["trades"] * 100, 1),
+             "total_pnl": round(value["pnl"], 2)}
+            for key, value in sorted(per_strategy.items(), key=lambda item: -item[1]["pnl"])
+        ]
+
+    @staticmethod
+    def _regime_breakdown(trades: list[dict]) -> list[dict]:
+        per_regime = Backtester._trade_breakdown(trades, "regime", False)
+        return [
+            {"regime": key, "trades": value["trades"],
+             "win_rate": round(value["wins"] / value["trades"] * 100, 1),
+             "total_pnl": round(value["pnl"], 2)}
+            for key, value in per_regime.items()
+        ]
+
     def _build_report(self, config: BacktestConfig, trades: list[dict],
                       equity_curve: list[dict], strategy_names: list[str]) -> dict:
         final_equity = equity_curve[-1]["equity"] if equity_curve else config.initial_balance
@@ -518,25 +320,11 @@ class Backtester:
 
         wins = [t for t in trades if t["pnl"] > 0]
         losses = [t for t in trades if t["pnl"] <= 0]
-        gross_profit = sum(t["pnl"] for t in wins)
-        gross_loss = abs(sum(t["pnl"] for t in losses))
-        if gross_loss > 0:
-            profit_factor = gross_profit / gross_loss
-        elif gross_profit > 0:
-            profit_factor = math.inf
-        else:
-            profit_factor = 0.0
+        profit_factor = self._profit_factor(wins, losses)
 
         # Sharpe / Sortino on per-candle equity returns, annualized by timeframe
         equity_series = pd.Series([p["equity"] for p in equity_curve])
-        returns = equity_series.pct_change().dropna()
-        periods_per_year = CANDLES_PER_YEAR.get(config.timeframe, 105120)
-        sharpe = sortino = 0.0
-        if len(returns) > 2 and returns.std() > 0:
-            sharpe = float(returns.mean() / returns.std() * math.sqrt(periods_per_year))
-            downside = returns[returns < 0]
-            if len(downside) > 1 and downside.std() > 0:
-                sortino = float(returns.mean() / downside.std() * math.sqrt(periods_per_year))
+        sharpe, sortino = self._risk_adjusted_metrics(equity_series, config.timeframe)
 
         # Max drawdown
         running_peak = equity_series.cummax()
@@ -544,36 +332,10 @@ class Backtester:
         max_drawdown_pct = float(drawdowns.min() * 100) if len(drawdowns) else 0.0
 
         # Per-strategy breakdown (split joined ensemble labels)
-        per_strategy: dict[str, dict] = {}
-        for t in trades:
-            for base in t["strategy"].split(" + "):
-                base = base.strip()
-                s = per_strategy.setdefault(base, {"trades": 0, "wins": 0, "pnl": 0.0})
-                s["trades"] += 1
-                s["pnl"] += t["pnl"]
-                if t["pnl"] > 0:
-                    s["wins"] += 1
-        strategy_breakdown = [
-            {"strategy": k, "trades": v["trades"], "wins": v["wins"],
-             "win_rate": round(v["wins"] / v["trades"] * 100, 1) if v["trades"] else 0,
-             "total_pnl": round(v["pnl"], 2)}
-            for k, v in sorted(per_strategy.items(), key=lambda kv: -kv[1]["pnl"])
-        ]
+        strategy_breakdown = self._strategy_breakdown(trades)
 
         # Regime breakdown
-        per_regime: dict[str, dict] = {}
-        for t in trades:
-            r = per_regime.setdefault(t["regime"], {"trades": 0, "wins": 0, "pnl": 0.0})
-            r["trades"] += 1
-            r["pnl"] += t["pnl"]
-            if t["pnl"] > 0:
-                r["wins"] += 1
-        regime_breakdown = [
-            {"regime": k, "trades": v["trades"],
-             "win_rate": round(v["wins"] / v["trades"] * 100, 1) if v["trades"] else 0,
-             "total_pnl": round(v["pnl"], 2)}
-            for k, v in per_regime.items()
-        ]
+        regime_breakdown = self._regime_breakdown(trades)
 
         total_fees = sum(t["fees"] for t in trades)
         # Thin the equity curve for the frontend chart (max ~500 points)
@@ -610,9 +372,417 @@ class Backtester:
         }
 
 
+class _BacktestRuntime:
+    def __init__(self, backtester: Backtester, config: BacktestConfig,
+                 data: dict[str, pd.DataFrame], strategy_names: list[str],
+                 progress_callback, sentiment_history: Optional[dict[str, int]],
+                 risk_manager: Optional[RiskManager], ml_filter: Optional[MLSignalFilter],
+                 funding_history: Optional[dict[str, dict[str, float]]]):
+        self.backtester = backtester
+        self.config = config
+        self.data = data
+        self.strategy_names = strategy_names
+        self.progress_callback = progress_callback
+        self.sentiment_history = sentiment_history
+        self.risk_manager = risk_manager or RiskManager()
+        self.ml_filter = ml_filter
+        self.funding_history = funding_history
+        self.ensemble = SignalEnsemble(
+            minimum_agreement_count=1 if config.mode == "solo" else 2,
+            minimum_composite_confidence=config.min_confidence,
+        )
+        self.performance_tracker = StrategyPerformanceTracker(rolling_window=30)
+        self.sentiment_helper = SentimentFilter()
+        self.funding_helper = FundingRateSignal()
+        self.balance = config.initial_balance
+        self.equity_curve: list[dict] = []
+        self.trades: list[dict] = []
+        self.open_positions: dict[str, SimPosition] = {}
+        self.slip = config.slippage_bps / 10000.0
+        self.effective_names = [n for n in strategy_names if n != "pairs"]
+        self.pairs_strategy = backtester._registry.get("pairs") if "pairs" in strategy_names else None
+        self.pairs_enabled = (
+            self.pairs_strategy is not None
+            and PAIRS_PRIMARY_SYMBOL in data
+            and PAIRS_HEDGE_SYMBOL in data
+        )
+        # Align all symbols to shortest history
+        self.min_len = min(len(df) for df in data.values())
+        self.total_steps = max(self.min_len - WINDOW_CANDLES - 1, 1)
+
+    def portfolio_value(self, i: int) -> float:
+        unrealized = 0.0
+        for sym, pos in self.open_positions.items():
+            price = float(self.data[sym]["close"].iloc[i])
+            if pos.side == "BUY":
+                unrealized += (price - pos.entry_price) * pos.quantity
+            else:
+                unrealized += (pos.entry_price - price) * pos.quantity
+        return self.balance + unrealized
+
+    def close(self, position: SimPosition, exit_price: float, reason: str, index: int, sym: str):
+        exit_fill = exit_price * (1 - self.slip) if position.side == "BUY" else exit_price * (1 + self.slip)
+        if position.side == "BUY":
+            pnl = (exit_fill - position.entry_price) * position.quantity
+        else:
+            pnl = (position.entry_price - exit_fill) * position.quantity
+        fees = (position.entry_price + exit_fill) * position.quantity * self.config.fee_rate
+        pnl -= fees
+        self.balance += pnl
+        cost = position.entry_price * position.quantity
+        pnl_percent = (pnl / cost * 100) if cost > 0 else 0.0
+        for name in position.strategy.split(" + "):
+            self.performance_tracker.record_trade_outcome(name.strip(), round(pnl_percent, 4))
+        self.trades.append({
+            "symbol": sym, "side": position.side, "strategy": position.strategy,
+            "regime": position.regime,
+            "entry_price": round(position.entry_price, 8), "exit_price": round(exit_fill, 8),
+            "quantity": round(position.quantity, 8), "pnl": round(pnl, 4),
+            "fees": round(fees, 4), "exit_reason": reason,
+            "held_candles": index - position.entry_index,
+            "opened_at": str(self.data[sym]["timestamp"].iloc[position.entry_index]),
+            "closed_at": str(self.data[sym]["timestamp"].iloc[index]),
+        })
+
+    def sentiment_at(self, sym: str, i: int) -> tuple[Optional[int], str]:
+        if not self.sentiment_history:
+            return None, "BOTH"
+        date_str = pd.Timestamp(self.data[sym]["timestamp"].iloc[i]).strftime("%Y-%m-%d")
+        value = self.sentiment_history.get(date_str)
+        if value is None:
+            return None, "BOTH"
+        _, bias = classify_value(value)
+        return value, bias
+
+    def funding_at(self, sym: str, i: int) -> Optional[tuple[float, str, float]]:
+        hist = self.funding_history.get(sym) if self.funding_history else None
+        if not hist:
+            return None
+        if "__constant__" in hist:
+            rate = hist["__constant__"]
+        else:
+            date_str = pd.Timestamp(self.data[sym]["timestamp"].iloc[i]).strftime("%Y-%m-%d")
+            rate = hist.get(date_str)
+            if rate is None:
+                return None
+        bias, strength = self.funding_helper._interpret_funding(rate)
+        return rate, bias, strength
+
+    def signal_adjustments(self, sym: str, direction: str, confidence: float, i: int):
+        # --- Sentiment macro filter (identical to live's macro gate) ---
+        sentiment_value, sentiment_bias = self.sentiment_at(sym, i)
+        if sentiment_value is not None and not is_direction_allowed(sentiment_bias, direction):
+            return None
+        sentiment_conf_adj = 1.0
+        if sentiment_value is not None:
+            reading = SentimentReading(
+                value=sentiment_value, classification="", timestamp=datetime.now(timezone.utc),
+                trading_allowed=True, trading_bias=sentiment_bias, reason="",
+            )
+            sentiment_conf_adj = self.sentiment_helper.get_confidence_adjustment(reading, direction)
+
+        # --- Funding-rate filter ---
+        funding_tuple = self.funding_at(sym, i)
+        funding_conf_adj = self.funding_adjustment(sym, direction, funding_tuple)
+        if funding_conf_adj is None:
+            return None
+        adjusted_confidence = min(confidence * sentiment_conf_adj * funding_conf_adj, 1.0)
+        return adjusted_confidence, sentiment_value, sentiment_bias, funding_tuple
+
+    def funding_adjustment(self, sym: str, direction: str,
+                           funding_tuple: Optional[tuple[float, str, float]]) -> Optional[float]:
+        if funding_tuple is None:
+            return 1.0
+        rate, funding_bias, funding_strength = funding_tuple
+        freading = FundingRateReading(
+            symbol=sym, funding_rate=rate, annualized_rate=0.0, signal_bias=funding_bias,
+            signal_strength=funding_strength, timestamp=datetime.now(timezone.utc), is_simulated=False,
+        )
+        if not self.funding_helper.is_signal_aligned_with_funding(direction, freading):
+            return None
+        return self.funding_helper.get_confidence_adjustment(direction, freading)
+
+    def resolve_existing(self, sym: str, direction: str, entry: float, i: int) -> bool:
+        # --- Reversal handling: close opposite position, no-op if same side already open ---
+        existing = self.open_positions.get(sym)
+        if existing is None:
+            return True
+        if existing.side == direction:
+            return False
+        self.close(existing, entry, "reversal", i, sym)
+        del self.open_positions[sym]
+        return True
+
+    def calculate_sizing(self, sym: str, direction: str, entry_fill: float, stop: float,
+                         tp: float, adjusted_confidence: float, label: str, i: int,
+                         forced_quantity: Optional[float]):
+        portfolio_value = self.portfolio_value(i)
+        self.risk_manager.update_peak_portfolio_value(portfolio_value)
+        best_kelly = max(
+            (self.performance_tracker.get_kelly_fraction(n.strip()) for n in label.split(" + ")),
+            default=0.02,
+        )
+        if forced_quantity is not None:
+            # Hedge legs bypass the risk gate to match the primary leg's USD
+            # value exactly — same as trading_engine._execute_ensemble_signal.
+            sizing = PositionSizeResult(
+                allowed=True, quantity=forced_quantity,
+                position_value=forced_quantity * entry_fill, risk_amount=0.0,
+            )
+        else:
+            sizing = self.risk_manager.calculate_position_size(
+                portfolio_value=portfolio_value, entry_price=entry_fill, stop_loss_price=stop,
+                signal_confidence=adjusted_confidence, open_positions_count=len(self.open_positions),
+                open_symbols=list(self.open_positions.keys()), symbol=sym, side=direction,
+                kelly_fraction=best_kelly, take_profit_price=tp,
+            )
+        return sizing, best_kelly, portfolio_value
+
+    def ml_allows(self, context: dict, forced_quantity: Optional[float]) -> bool:
+        # --- ML adaptive filter (hedge legs bypass it, same as live) ---
+        if forced_quantity is not None or self.ml_filter is None:
+            return True
+        entry_fill = context["entry_fill"]
+        stop = context["stop"]
+        tp = context["tp"]
+        stop_distance_pct = abs(entry_fill - stop) / entry_fill * 100 if entry_fill else 0.0
+        rr_ratio = abs(tp - entry_fill) / max(abs(entry_fill - stop), 1e-10)
+        funding_tuple = context["funding_tuple"]
+        features = {
+            "symbol": context["sym"], "direction": context["direction"], "regime": context["regime"],
+            "ensemble_confidence": round(context["adjusted_confidence"], 4),
+            "regime_boost": context["regime_boost"],
+            "agreeing_strategies_count": context["agreeing_count"],
+            "disagreeing_strategies_count": context["disagreeing_count"],
+            "sentiment_value": context["sentiment_value"] if context["sentiment_value"] is not None else 50,
+            "sentiment_bias": context["sentiment_bias"],
+            "funding_rate": funding_tuple[0] if funding_tuple else 0.0,
+            "funding_bias": funding_tuple[1] if funding_tuple else "NEUTRAL",
+            "kelly_fraction": round(context["best_kelly"], 4),
+            "stop_distance_pct": round(stop_distance_pct, 4),
+            "risk_reward_ratio": round(rr_ratio, 3),
+            "portfolio_drawdown_at_entry": round(
+                self.risk_manager.compute_current_drawdown_percent(context["portfolio_value"]), 2),
+            "open_positions_at_entry": len(self.open_positions),
+            "hft_mode": False,
+        }
+        ml_probability = self.ml_filter.score(features)
+        return ml_probability is None or ml_probability >= self.ml_filter.min_win_probability
+
+    def try_open(self, sym: str, direction: str, entry: float, stop: float, tp: float,
+                 confidence: float, label: str, regime: str, regime_boost: float,
+                 agreeing_count: int, disagreeing_count: int, i: int,
+                 forced_quantity: Optional[float] = None) -> Optional[SimPosition]:
+        adjustments = self.signal_adjustments(sym, direction, confidence, i)
+        if adjustments is None or not self.resolve_existing(sym, direction, entry, i):
+            return None
+        if len(self.open_positions) >= self.config.max_positions:
+            return None
+        adjusted_confidence, sentiment_value, sentiment_bias, funding_tuple = adjustments
+        entry_fill = entry * (1 + self.slip) if direction == "BUY" else entry * (1 - self.slip)
+        sizing, best_kelly, portfolio_value = self.calculate_sizing(
+            sym, direction, entry_fill, stop, tp, adjusted_confidence, label, i, forced_quantity,
+        )
+        ml_context = {
+            "sym": sym, "direction": direction, "entry_fill": entry_fill, "stop": stop, "tp": tp,
+            "adjusted_confidence": adjusted_confidence, "regime": regime, "regime_boost": regime_boost,
+            "agreeing_count": agreeing_count, "disagreeing_count": disagreeing_count,
+            "sentiment_value": sentiment_value, "sentiment_bias": sentiment_bias,
+            "funding_tuple": funding_tuple, "best_kelly": best_kelly, "portfolio_value": portfolio_value,
+        }
+        if not sizing.allowed or not self.ml_allows(ml_context, forced_quantity):
+            return None
+        position = SimPosition(
+            symbol=sym, side=direction, entry_price=entry_fill, quantity=sizing.quantity,
+            stop_loss=stop, take_profit=tp, entry_index=i, strategy=label, regime=regime,
+        )
+        self.open_positions[sym] = position
+        return position
+
+    def close_open_positions(self, i: int):
+        # 1) Check exits on all open positions
+        for sym in self.open_positions.copy():
+            pos = self.open_positions[sym]
+            row = self.data[sym].iloc[i]
+            exit_hit = self.backtester._candle_exit(pos, float(row["high"]), float(row["low"]))
+            if exit_hit:
+                self.close(pos, exit_hit[0], exit_hit[1], i, sym)
+                del self.open_positions[sym]
+            elif i - pos.entry_index >= self.config.max_hold_candles:
+                self.close(pos, float(row["close"]), "time_exit", i, sym)
+                del self.open_positions[sym]
+
+    def open_generic_positions(self, i: int):
+        # 2) Look for entries — generic per-symbol ensemble/solo signals
+        if not self.effective_names or len(self.open_positions) >= self.config.max_positions:
+            return
+        for sym in self.data:
+            if len(self.open_positions) >= self.config.max_positions:
+                break
+            result = self.backtester._signal_for_window(
+                sym, self.data, i, self.config, self.effective_names,
+                self.ensemble, self.performance_tracker,
+            )
+            if result is None:
+                continue
+            self.try_open(
+                sym, result.direction, result.entry, result.stop, result.tp, result.confidence,
+                result.label, result.regime, result.regime_boost,
+                result.agreeing_count, result.disagreeing_count, i,
+            )
+
+    def open_pairs_positions(self, i: int):
+        # 2b) Statistical Arbitrage — dedicated delta-neutral BTC/ETH pairs trade,
+        # executed outside the ensemble exactly like the live engine's separate
+        # _run_pairs_signal() path (both legs must be attempted together).
+        if not self.pairs_enabled or (self.config.max_positions - len(self.open_positions)) < 2:
+            return
+        btc_window = self.data[PAIRS_PRIMARY_SYMBOL].iloc[i - WINDOW_CANDLES:i + 1].reset_index(drop=True)
+        eth_window = self.data[PAIRS_HEDGE_SYMBOL].iloc[i - WINDOW_CANDLES:i + 1].reset_index(drop=True)
+        try:
+            sig = self.pairs_strategy.compute_signal_from_pair(PAIRS_PRIMARY_SYMBOL, btc_window, eth_window)
+        except Exception:
+            sig = None
+        if not sig:
+            return
+        regime_value = self.backtester.regime_detector.analyze(btc_window).regime.value
+        hedge_dir = "SELL" if sig.signal_type == "BUY" else "BUY"
+        eth_price = float(eth_window["close"].iloc[-1])
+        sl_pct = abs(sig.price - sig.suggested_stop_loss) / sig.price if sig.price > 0 else 0.02
+        tp_pct = abs(sig.suggested_take_profit - sig.price) / sig.price if sig.price > 0 else 0.04
+        eth_sl, eth_tp = self.hedge_targets(hedge_dir, eth_price, sl_pct, tp_pct)
+        primary_pos = self.try_open(
+            PAIRS_PRIMARY_SYMBOL, sig.signal_type, sig.price, sig.suggested_stop_loss,
+            sig.suggested_take_profit, sig.strength, PAIRS_STRATEGY_LABEL, regime_value,
+            1.0, 1, 0, i,
+        )
+        if primary_pos is None or eth_price <= 0:
+            return
+        forced_qty = round(primary_pos.quantity * primary_pos.entry_price / eth_price, 8)
+        if forced_qty > 0:
+            self.try_open(
+                PAIRS_HEDGE_SYMBOL, hedge_dir, eth_price, eth_sl, eth_tp,
+                sig.strength, PAIRS_STRATEGY_LABEL, regime_value, 1.0, 1, 0, i,
+                forced_quantity=forced_qty,
+            )
+
+    @staticmethod
+    def hedge_targets(hedge_dir: str, eth_price: float, sl_pct: float,
+                      tp_pct: float) -> tuple[float, float]:
+        if hedge_dir == "BUY":
+            return eth_price * (1 - sl_pct), eth_price * (1 + tp_pct)
+        return eth_price * (1 + sl_pct), eth_price * (1 - tp_pct)
+
+    def record_step(self, step: int, i: int):
+        # 3) Mark-to-market equity
+        self.equity_curve.append({
+            "timestamp": str(self.data[next(iter(self.data))]["timestamp"].iloc[i]),
+            "equity": round(self.portfolio_value(i), 2),
+        })
+        if self.progress_callback and step % 200 == 0:
+            self.progress_callback(step / self.total_steps)
+        # Yield the GIL periodically so this CPU-heavy loop (running in a
+        # background thread) doesn't starve the main asyncio event loop —
+        # without this, other API requests (prices, status) stall while a
+        # backtest is running.
+        if step % 25 == 0:
+            time.sleep(0)
+
+    def run(self) -> dict:
+        for step, i in enumerate(range(WINDOW_CANDLES, self.min_len - 1)):
+            self.close_open_positions(i)
+            self.open_generic_positions(i)
+            self.open_pairs_positions(i)
+            self.record_step(step, i)
+        # Force-close leftovers at final close
+        last_i = self.min_len - 2
+        for sym in self.open_positions.copy():
+            pos = self.open_positions[sym]
+            self.close(pos, float(self.data[sym]["close"].iloc[last_i]), "end_of_backtest", last_i, sym)
+            del self.open_positions[sym]
+        return self.backtester._build_report(
+            self.config, self.trades, self.equity_curve, self.strategy_names,
+        )
+
+
 # ── Worker-process entry point ───────────────────────────────────────────
 # Must be a plain module-level function (not a bound method) so it can be
 # pickled and sent to a fresh worker process on Windows (spawn start method).
+def _job_symbols(config: BacktestConfig) -> list[str]:
+    # Statistical Arbitrage needs both legs of the BTC/ETH spread even if
+    # the user only selected one of them as a symbol to trade.
+    symbols_to_fetch = list(config.symbols)
+    if "pairs" not in config.strategies:
+        return symbols_to_fetch
+    for required in (PAIRS_PRIMARY_SYMBOL, PAIRS_HEDGE_SYMBOL):
+        if required not in symbols_to_fetch:
+            symbols_to_fetch.append(required)
+    return symbols_to_fetch
+
+
+def _fetch_job_data(config: BacktestConfig) -> dict[str, pd.DataFrame]:
+    data: dict[str, pd.DataFrame] = {}
+    for sym in _job_symbols(config):
+        df = Backtester.fetch_history_sync(sym, config.timeframe, config.days)
+        if len(df) > WINDOW_CANDLES + 10:
+            data[sym] = df
+    return data
+
+
+def _make_job_risk_manager(config: BacktestConfig, risk_kwargs: Optional[dict]) -> RiskManager:
+    # Fresh instance per run — RiskManager carries mutable state
+    # (peak portfolio value, circuit breaker) that must not leak
+    # between compare mode's independent sub-runs.
+    risk_manager = RiskManager(**(risk_kwargs or {}))
+    config.max_positions = risk_manager.max_concurrent_positions
+    return risk_manager
+
+
+def _run_comparison(job: Any, backtester: Backtester, config: BacktestConfig,
+                    data: dict[str, pd.DataFrame], sentiment_history: dict[str, int],
+                    funding_history: dict[str, dict[str, float]], ml_filter: MLSignalFilter,
+                    risk_kwargs: Optional[dict]):
+    # Run every strategy solo + ensemble + adaptive, collect summary.
+    # Progress must be monotonic across ALL sub-runs (not reset to 0
+    # for each one) so the UI progress bar doesn't visibly loop.
+    results = {}
+    total_runs = len(config.strategies) + 2
+
+    def _progress_for(run_index: int):
+        def _cb(fraction: float):
+            job["progress"] = round((run_index + fraction) / total_runs, 3)
+        return _cb
+
+    runs = [(name, "solo", [name]) for name in config.strategies]
+    runs.extend((mode, mode, config.strategies) for mode in ("ensemble", "adaptive"))
+    for run_index, (name, mode, strategies) in enumerate(runs):
+        cfg = BacktestConfig(**{**vars(config), "mode": mode, "strategies": strategies})
+        results[name] = backtester.run(
+            cfg, data, strategies, _progress_for(run_index), sentiment_history,
+            risk_manager=_make_job_risk_manager(config, risk_kwargs), ml_filter=ml_filter,
+            funding_history=funding_history,
+        )
+    comparison = [{"name": key, **value["metrics"]} for key, value in results.items()]
+    comparison.sort(key=lambda result: result["total_return_pct"], reverse=True)
+    job["result"] = {
+        "mode": "compare", "comparison": comparison, "runs": results,
+        "best": comparison[0]["name"] if comparison else None,
+    }
+
+
+def _run_single(job: Any, backtester: Backtester, config: BacktestConfig,
+                data: dict[str, pd.DataFrame], sentiment_history: dict[str, int],
+                funding_history: dict[str, dict[str, float]], ml_filter: MLSignalFilter,
+                risk_kwargs: Optional[dict]):
+    def _progress(fraction: float):
+        job["progress"] = round(fraction, 3)
+    job["result"] = backtester.run(
+        config, data, config.strategies, _progress, sentiment_history,
+        risk_manager=_make_job_risk_manager(config, risk_kwargs), ml_filter=ml_filter,
+        funding_history=funding_history,
+    )
+
+
 def _execute_backtest_job(job: Any, registry: dict, config: BacktestConfig, risk_kwargs: Optional[dict]):
     """Runs an entire backtest job (data fetch + simulation) inside an isolated
     worker process. This is what actually fixes other pages stalling while a
@@ -624,84 +794,20 @@ def _execute_backtest_job(job: Any, registry: dict, config: BacktestConfig, risk
     try:
         backtester = Backtester(registry)
         job["status"] = "fetching_data"
-        # Statistical Arbitrage needs both legs of the BTC/ETH spread even if
-        # the user only selected one of them as a symbol to trade.
-        symbols_to_fetch = list(config.symbols)
-        if "pairs" in config.strategies:
-            for required in (PAIRS_PRIMARY_SYMBOL, PAIRS_HEDGE_SYMBOL):
-                if required not in symbols_to_fetch:
-                    symbols_to_fetch.append(required)
-        data: dict[str, pd.DataFrame] = {}
-        for sym in symbols_to_fetch:
-            df = Backtester.fetch_history_sync(sym, config.timeframe, config.days)
-            if len(df) > WINDOW_CANDLES + 10:
-                data[sym] = df
+        data = _fetch_job_data(config)
         if not data:
             job["status"] = "failed"
             job["error"] = "No historical data fetched"
             return
-
         sentiment_history = Backtester.fetch_sentiment_history_sync(config.days)
         funding_history = Backtester.fetch_funding_history_sync(list(data.keys()), config.days)
         # One shared ML filter instance: it loads the SAME trained model.joblib
         # the live engine scores entries with. Scoring is stateless/read-only,
         # so it's safe to reuse across every sub-run in compare mode.
         ml_filter = MLSignalFilter()
-
-        def _make_risk_manager() -> RiskManager:
-            # Fresh instance per run — RiskManager carries mutable state
-            # (peak portfolio value, circuit breaker) that must not leak
-            # between compare mode's independent sub-runs.
-            rm = RiskManager(**(risk_kwargs or {}))
-            config.max_positions = rm.max_concurrent_positions
-            return rm
-
         job["status"] = "running"
-        if config.mode == "compare":
-            # Run every strategy solo + ensemble + adaptive, collect summary.
-            # Progress must be monotonic across ALL sub-runs (not reset to 0
-            # for each one) so the UI progress bar doesn't visibly loop.
-            results = {}
-            solo_config_base = config
-            total_runs = len(config.strategies) + 2
-
-            def _progress_for(run_index: int):
-                def _cb(fraction: float):
-                    job["progress"] = round((run_index + fraction) / total_runs, 3)
-                return _cb
-
-            run_index = 0
-            for name in config.strategies:
-                cfg = BacktestConfig(**{**vars(solo_config_base), "mode": "solo", "strategies": [name]})
-                results[name] = backtester.run(
-                    cfg, data, [name], _progress_for(run_index), sentiment_history,
-                    risk_manager=_make_risk_manager(), ml_filter=ml_filter, funding_history=funding_history,
-                )
-                run_index += 1
-            for combo_mode in ("ensemble", "adaptive"):
-                cfg = BacktestConfig(**{**vars(solo_config_base), "mode": combo_mode})
-                results[combo_mode] = backtester.run(
-                    cfg, data, config.strategies, _progress_for(run_index), sentiment_history,
-                    risk_manager=_make_risk_manager(), ml_filter=ml_filter, funding_history=funding_history,
-                )
-                run_index += 1
-            comparison = [
-                {"name": k, **v["metrics"]} for k, v in results.items()
-            ]
-            comparison.sort(key=lambda r: r["total_return_pct"], reverse=True)
-            job["result"] = {
-                "mode": "compare",
-                "comparison": comparison,
-                "runs": results,
-                "best": comparison[0]["name"] if comparison else None,
-            }
-        else:
-            def _progress(fraction: float):
-                job["progress"] = round(fraction, 3)
-            job["result"] = backtester.run(
-                config, data, config.strategies, _progress, sentiment_history,
-                risk_manager=_make_risk_manager(), ml_filter=ml_filter, funding_history=funding_history,
-            )
+        runner = _run_comparison if config.mode == "compare" else _run_single
+        runner(job, backtester, config, data, sentiment_history, funding_history, ml_filter, risk_kwargs)
         job["status"] = "completed"
         job["progress"] = 1.0
         job["finished_at"] = datetime.now(timezone.utc).isoformat()

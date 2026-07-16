@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Callable
 
 logger = logging.getLogger(__name__)
@@ -31,7 +31,7 @@ class TwapOrder:
     avg_fill_price: float = 0.0
     total_filled: float = 0.0
     is_complete: bool = False
-    started_at: datetime = field(default_factory=datetime.utcnow)
+    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def completion_percent(self) -> float:
         if self.total_slices == 0:
@@ -70,6 +70,42 @@ class TwapExecutor:
         self.simulated_slippage_bps = simulated_slippage_bps
         self._active_orders: dict[str, TwapOrder] = {}
 
+    def _slice_count(self, total_quantity: float, price: Optional[float], requested: Optional[int]) -> int:
+        count = requested or self.default_slices
+        if price is None or price <= 0:
+            return count
+        max_count = max(1, int((total_quantity * price) / _MIN_NOTIONAL))
+        if count > max_count:
+            logger.info("TWAP: reducing slices %d -> %d to satisfy MIN_NOTIONAL", count, max_count)
+            return max_count
+        return count
+
+    @staticmethod
+    def _precise_quantity(exchange, symbol: str, quantity: float) -> float:
+        if exchange is None:
+            return quantity
+        try:
+            return float(exchange.amount_to_precision(symbol, quantity))
+        except Exception:
+            return quantity
+
+    def _build_slices(self, symbol: str, total_quantity: float, count: int,
+                      interval: float, exchange) -> list[TwapSlice]:
+        slice_qty = self._precise_quantity(exchange, symbol, total_quantity / count)
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        result = []
+        for index in range(count):
+            quantity = slice_qty
+            if index == count - 1 and exchange is not None:
+                remainder = total_quantity - slice_qty * (count - 1)
+                quantity = self._precise_quantity(exchange, symbol, remainder)
+            result.append(TwapSlice(
+                slice_number=index + 1,
+                quantity=quantity,
+                target_time=now + timedelta(seconds=index * interval),
+            ))
+        return result
+
     def create_order(
         self,
         symbol: str,
@@ -80,58 +116,66 @@ class TwapExecutor:
         exchange=None,
         price: Optional[float] = None,
     ) -> TwapOrder:
-        n_slices = slices or self.default_slices
-        # Bug #2: reduce n_slices so every slice meets Binance MIN_NOTIONAL ($5.00)
-        if price is not None and price > 0:
-            max_slices_by_notional = max(1, int((total_quantity * price) / _MIN_NOTIONAL))
-            if n_slices > max_slices_by_notional:
-                logger.info("TWAP: reducing slices %d -> %d to satisfy MIN_NOTIONAL",
-                            n_slices, max_slices_by_notional)
-                n_slices = max_slices_by_notional
+        count = self._slice_count(total_quantity, price, slices)
         interval = interval_seconds or self.default_interval_seconds
-        raw_slice_qty = total_quantity / n_slices
-        # Bug #1: apply exchange lot-size precision to every slice to prevent InvalidOrder
-        if exchange is not None:
-            try:
-                raw_slice_qty = float(exchange.amount_to_precision(symbol, raw_slice_qty))
-            except Exception:
-                pass
-        slice_qty = raw_slice_qty
-
-        now = datetime.utcnow()
-        base_time = datetime(now.year, now.month, now.day, now.hour, now.minute, now.second)
-        # Bug #1: last slice sweeps the remainder to avoid precision dust
-        # e.g. 10 / 3 slices = 3.333 * 3 = 9.999, leaving 0.001 unfilled
-        slice_list = []
-        for i in range(n_slices):
-            if i == n_slices - 1 and exchange is not None:
-                # Remainder = total - sum of all previous slices
-                remainder = total_quantity - slice_qty * (n_slices - 1)
-                try:
-                    qty = float(exchange.amount_to_precision(symbol, remainder))
-                except Exception:
-                    qty = remainder
-            else:
-                qty = slice_qty
-            slice_list.append(TwapSlice(
-                slice_number=i + 1,
-                quantity=qty,
-                target_time=base_time + timedelta(seconds=i * interval),
-            ))
-
+        now = datetime.now(timezone.utc)
         order = TwapOrder(
             symbol=symbol,
             side=side,
             total_quantity=total_quantity,
-            total_slices=n_slices,
+            total_slices=count,
             interval_seconds=interval,
-            slices=slice_list,
+            slices=self._build_slices(symbol, total_quantity, count, interval, exchange),
+            started_at=now,
         )
-        order_key = f"{symbol}_{side}_{now.timestamp()}"
-        self._active_orders[order_key] = order
+        self._active_orders[f"{symbol}_{side}_{now.timestamp()}"] = order
         logger.info("TWAP order created: %s %s qty=%.6f in %d slices every %.0fs",
-                    side, symbol, total_quantity, n_slices, interval)
+                    side, symbol, total_quantity, count, interval)
         return order
+
+    async def _fill_slice(self, order: TwapOrder, slice_order: TwapSlice,
+                          get_current_price_fn: Callable, exchange, slippage_factor: float) -> tuple[float, float]:
+        current_price = await get_current_price_fn(order.symbol)
+        if current_price is None:
+            raise ValueError(f"No price for {order.symbol}")
+        if exchange is not None:
+            live_order = await exchange.create_market_order(order.symbol, order.side, slice_order.quantity)
+            fill_price = float(live_order.get("average") or live_order.get("price") or current_price)
+            raw_filled = float(live_order.get("filled") or slice_order.quantity)
+            quantity = raw_filled * (1 - TRADE_FEE_RATE) if order.side.upper() == "BUY" else raw_filled
+        else:
+            import random
+            direction = 1.0 if order.side.upper() == "BUY" else -1.0
+            fill_price = current_price + current_price * slippage_factor * direction * random.uniform(0.5, 1.5)
+            quantity = slice_order.quantity
+        return fill_price, quantity
+
+    async def _execute_slice(self, order: TwapOrder, slice_order: TwapSlice,
+                             index: int, get_current_price_fn: Callable,
+                             on_slice_filled_fn: Optional[Callable], exchange,
+                             slippage_factor: float) -> tuple[float, float]:
+        if index > 0:
+            await asyncio.sleep(order.interval_seconds)
+        fill_price, quantity = await self._fill_slice(
+            order, slice_order, get_current_price_fn, exchange, slippage_factor)
+        slice_order.executed = True
+        slice_order.fill_price = round(fill_price, 8)
+        slice_order.executed_at = datetime.now(timezone.utc)
+        logger.info("TWAP slice %d/%d filled: %s %s %.6f @ %.4f",
+                    index + 1, order.total_slices, order.side, order.symbol,
+                    slice_order.quantity, fill_price)
+        if on_slice_filled_fn:
+            await on_slice_filled_fn(slice_order)
+        return fill_price, quantity
+
+    def _purge_completed_orders(self) -> None:
+        now = datetime.now(timezone.utc)
+        stale_keys = [
+            key for key, order in self._active_orders.items()
+            if order.is_complete and (now - order.started_at).total_seconds() > 3600
+        ]
+        for key in stale_keys:
+            del self._active_orders[key]
 
     async def execute_order(
         self,
@@ -140,78 +184,26 @@ class TwapExecutor:
         on_slice_filled_fn: Optional[Callable] = None,
         exchange=None,
     ) -> TwapOrder:
-        """
-        Executes all slices of the TWAP order with proper timing.
-        If exchange is provided, submits real market orders per slice (live mode).
-        Otherwise simulates fills with realistic slippage (paper mode).
-        """
-        import random
         slippage_factor = self.simulated_slippage_bps / 10000
-
         total_value = 0.0
         total_qty_filled = 0.0
-
-        for i, slice_order in enumerate(order.slices):
-            if i > 0:
-                await asyncio.sleep(order.interval_seconds)
-
+        for index, slice_order in enumerate(order.slices):
             try:
-                current_price = await get_current_price_fn(order.symbol)
-                if current_price is None:
-                    logger.warning("TWAP: no price for %s, skipping slice %d", order.symbol, i + 1)
-                    continue
-
-                if exchange is not None:
-                    live_order = await exchange.create_market_order(
-                        order.symbol, order.side, slice_order.quantity
-                    )
-                    fill_price = float(
-                        live_order.get("average") or live_order.get("price") or current_price
-                    )
-                    # Bug #1: on Binance Spot BUY, fee is taken from the received asset.
-                    # CCXT 'filled' = gross matched volume; net delivery = filled * (1 - fee_rate)
-                    _raw_filled = float(live_order.get("filled") or slice_order.quantity)
-                    slice_filled_qty = (
-                        _raw_filled * (1 - TRADE_FEE_RATE)
-                        if order.side.upper() == "BUY"
-                        else _raw_filled
-                    )
-                else:
-                    # Simulate realistic slippage
-                    direction_mult = 1.0 if order.side.upper() == "BUY" else -1.0
-                    slippage = current_price * slippage_factor * direction_mult * random.uniform(0.5, 1.5)
-                    fill_price = current_price + slippage
-                    slice_filled_qty = slice_order.quantity
-
-                slice_order.executed = True
-                slice_order.fill_price = round(fill_price, 8)
-                slice_order.executed_at = datetime.utcnow()
-
-                total_value += fill_price * slice_filled_qty
-                total_qty_filled += slice_filled_qty
-
-                logger.info("TWAP slice %d/%d filled: %s %s %.6f @ %.4f",
-                            i + 1, order.total_slices, order.side, order.symbol,
-                            slice_order.quantity, fill_price)
-
-                if on_slice_filled_fn:
-                    await on_slice_filled_fn(slice_order)
-
-            except Exception as exc:
-                logger.error("TWAP slice %d error: %s", i + 1, exc)
-
+                fill_price, quantity = await self._execute_slice(
+                    order, slice_order, index, get_current_price_fn,
+                    on_slice_filled_fn, exchange, slippage_factor)
+                total_value += fill_price * quantity
+                total_qty_filled += quantity
+            except ValueError:
+                logger.warning("TWAP: no price for %s, skipping slice %d", order.symbol, index + 1)
+            except Exception:
+                logger.exception("TWAP slice %d error", index + 1)
         order.total_filled = total_qty_filled
         order.avg_fill_price = round(total_value / total_qty_filled, 8) if total_qty_filled > 0 else 0.0
         order.is_complete = True
         logger.info("TWAP complete: %s %s avg_fill=%.4f total_filled=%.6f",
                     order.side, order.symbol, order.avg_fill_price, order.total_filled)
-        # Purge old completed orders to prevent unbounded memory growth
-        stale_keys = [
-            k for k, o in self._active_orders.items()
-            if o.is_complete and (datetime.utcnow() - o.started_at).total_seconds() > 3600
-        ]
-        for k in stale_keys:
-            del self._active_orders[k]
+        self._purge_completed_orders()
         return order
 
     def get_active_orders(self) -> list[dict]:

@@ -49,6 +49,94 @@ class BollingerBandsStrategy(BaseStrategy):
         bandwidth = (upper_band - lower_band) / rolling_mean
         return rolling_mean, upper_band, lower_band, bandwidth
 
+    def _build_lower_band_signal(
+        self,
+        symbol: str,
+        current_price: float,
+        current_upper: float,
+        current_lower: float,
+        current_middle: float,
+        volume_surge: bool,
+        current_rsi: float,
+    ) -> Optional[TradingSignal]:
+        if not volume_surge or current_rsi > self.rsi_oversold:
+            return None
+        stop_price = max(
+            self.calculate_stop_loss(current_price, "BUY", self.stop_loss_percent),
+            current_lower * 0.995,
+        )
+        stop_distance = current_price - stop_price
+        target_price = max(
+            self.calculate_take_profit(current_price, "BUY", self.take_profit_percent),
+            current_middle,
+        )
+        target_distance = target_price - current_price
+        if stop_distance <= 0 or (target_distance / stop_distance) < self.min_rr_ratio:
+            return None
+        signal_strength = min(0.5 + (0.3 * ((self.rsi_oversold - current_rsi) / self.rsi_oversold)), 1.0)
+        band_position = (current_price - current_lower) / (current_upper - current_lower + 1e-10)
+        return TradingSignal(
+            symbol=symbol,
+            strategy_name=self.name,
+            signal_type="BUY",
+            strength=round(signal_strength, 3),
+            price=current_price,
+            suggested_stop_loss=round(stop_price, 8),
+            suggested_take_profit=round(target_price, 8),
+            details={
+                "upper_band": round(current_upper, 4),
+                "middle_band": round(current_middle, 4),
+                "lower_band": round(current_lower, 4),
+                "band_position": round(band_position, 3),
+                "volume_surge": volume_surge,
+                "condition": "lower_band_bounce",
+            },
+        )
+
+    def _build_upper_band_signal(
+        self,
+        symbol: str,
+        current_price: float,
+        current_upper: float,
+        current_lower: float,
+        current_middle: float,
+        volume_surge: bool,
+        current_rsi: float,
+    ) -> Optional[TradingSignal]:
+        if not volume_surge or current_rsi < self.rsi_overbought:
+            return None
+        stop_price = min(
+            self.calculate_stop_loss(current_price, "SELL", self.stop_loss_percent),
+            current_upper * 1.005,
+        )
+        stop_distance = stop_price - current_price
+        target_price = min(
+            self.calculate_take_profit(current_price, "SELL", self.take_profit_percent),
+            current_middle,
+        )
+        target_distance = current_price - target_price
+        if stop_distance <= 0 or (target_distance / stop_distance) < self.min_rr_ratio:
+            return None
+        signal_strength = min(0.5 + (0.3 * ((current_rsi - self.rsi_overbought) / (100 - self.rsi_overbought))), 1.0)
+        band_position = (current_price - current_lower) / (current_upper - current_lower + 1e-10)
+        return TradingSignal(
+            symbol=symbol,
+            strategy_name=self.name,
+            signal_type="SELL",
+            strength=round(signal_strength, 3),
+            price=current_price,
+            suggested_stop_loss=round(stop_price, 8),
+            suggested_take_profit=round(target_price, 8),
+            details={
+                "upper_band": round(current_upper, 4),
+                "middle_band": round(current_middle, 4),
+                "lower_band": round(current_lower, 4),
+                "band_position": round(band_position, 3),
+                "volume_surge": volume_surge,
+                "condition": "upper_band_touch",
+            },
+        )
+
     def compute_signal(self, symbol: str, ohlcv_dataframe: pd.DataFrame) -> Optional[TradingSignal]:
         if len(ohlcv_dataframe) < self.requires_minimum_candles():
             return None
@@ -71,86 +159,16 @@ class BollingerBandsStrategy(BaseStrategy):
         rsi_series = self._compute_rsi(closes)
         current_rsi = float(rsi_series.iloc[-1])
 
-        # Price bounces off lower band (was below, now above) = BUY signal
-        # 70% WR gate: volume surge + RSI oversold confirmation
         lower_band_bounce = previous_price <= previous_lower and current_price > current_lower
         if lower_band_bounce:
-            if not volume_surge or current_rsi > self.rsi_oversold:
-                return None
-            # Stop: tighter of percentage stop vs just-below lower band
-            stop_price = max(
-                self.calculate_stop_loss(current_price, "BUY", self.stop_loss_percent),
-                current_lower * 0.995,
-            )
-            stop_distance = current_price - stop_price
-            # Target: middle band is the mean-reversion destination
-            target_price = max(
-                self.calculate_take_profit(current_price, "BUY", self.take_profit_percent),
-                current_middle,
-            )
-            target_distance = target_price - current_price
-            # Skip if R:R is below minimum — middle band too close for the stop taken
-            if stop_distance <= 0 or (target_distance / stop_distance) < self.min_rr_ratio:
-                return None
-            signal_strength = min(0.5 + (0.3 * ((self.rsi_oversold - current_rsi) / self.rsi_oversold)), 1.0)
-            band_position = (current_price - current_lower) / (current_upper - current_lower + 1e-10)
-            return TradingSignal(
-                symbol=symbol,
-                strategy_name=self.name,
-                signal_type="BUY",
-                strength=round(signal_strength, 3),
-                price=current_price,
-                suggested_stop_loss=round(stop_price, 8),
-                suggested_take_profit=round(target_price, 8),
-                details={
-                    "upper_band": round(current_upper, 4),
-                    "middle_band": round(current_middle, 4),
-                    "lower_band": round(current_lower, 4),
-                    "band_position": round(band_position, 3),
-                    "volume_surge": volume_surge,
-                    "condition": "lower_band_bounce",
-                },
+            return self._build_lower_band_signal(
+                symbol, current_price, current_upper, current_lower, current_middle, volume_surge, current_rsi
             )
 
-        # Price hits upper band (was below, now above) = SELL signal
-        # 70% WR gate: volume surge + RSI overbought confirmation
         upper_band_touch = previous_price <= previous_upper and current_price >= current_upper
         if upper_band_touch:
-            if not volume_surge or current_rsi < self.rsi_overbought:
-                return None
-            # Stop: tighter of percentage stop vs just-above upper band
-            stop_price = min(
-                self.calculate_stop_loss(current_price, "SELL", self.stop_loss_percent),
-                current_upper * 1.005,
-            )
-            stop_distance = stop_price - current_price
-            # Target: middle band is the mean-reversion destination
-            target_price = min(
-                self.calculate_take_profit(current_price, "SELL", self.take_profit_percent),
-                current_middle,
-            )
-            target_distance = current_price - target_price
-            # Skip if R:R is below minimum
-            if stop_distance <= 0 or (target_distance / stop_distance) < self.min_rr_ratio:
-                return None
-            signal_strength = min(0.5 + (0.3 * ((current_rsi - self.rsi_overbought) / (100 - self.rsi_overbought))), 1.0)
-            band_position = (current_price - current_lower) / (current_upper - current_lower + 1e-10)
-            return TradingSignal(
-                symbol=symbol,
-                strategy_name=self.name,
-                signal_type="SELL",
-                strength=round(signal_strength, 3),
-                price=current_price,
-                suggested_stop_loss=round(stop_price, 8),
-                suggested_take_profit=round(target_price, 8),
-                details={
-                    "upper_band": round(current_upper, 4),
-                    "middle_band": round(current_middle, 4),
-                    "lower_band": round(current_lower, 4),
-                    "band_position": round(band_position, 3),
-                    "volume_surge": volume_surge,
-                    "condition": "upper_band_touch",
-                },
+            return self._build_upper_band_signal(
+                symbol, current_price, current_upper, current_lower, current_middle, volume_surge, current_rsi
             )
 
         return None

@@ -1,12 +1,12 @@
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 import ccxt.async_support as ccxt
 
 _FUTURES_EXCHANGE: Optional[ccxt.Exchange] = None
 
-async def _get_public_futures_exchange() -> ccxt.Exchange:
+def _get_public_futures_exchange() -> ccxt.Exchange:
     """Returns a shared public Binance futures exchange (no auth needed for funding rates)."""
     global _FUTURES_EXCHANGE
     if _FUTURES_EXCHANGE is None:
@@ -94,7 +94,7 @@ class FundingRateSignal:
         # Check if we have a recent cached value (funding rates update every 8h, so 5min cache is safe)
         if spot_symbol in self._cache:
             cached = self._cache[spot_symbol]
-            age_seconds = (datetime.utcnow() - cached.timestamp).total_seconds()
+            age_seconds = (datetime.now(timezone.utc) - cached.timestamp).total_seconds()
             if age_seconds < self._cache_ttl_seconds:
                 return cached
         
@@ -110,7 +110,7 @@ class FundingRateSignal:
                 # to the shared public Binance swap exchange (no API key required).
                 exchange_to_use = self._exchange
                 if exchange_to_use is None or exchange_to_use.options.get("defaultType") == "spot":
-                    exchange_to_use = await _get_public_futures_exchange()
+                    exchange_to_use = _get_public_futures_exchange()
                 funding_info = await exchange_to_use.fetch_funding_rate(perp_symbol)
                 raw_rate = float(funding_info.get("fundingRate", raw_rate))
                 is_simulated = False
@@ -127,7 +127,7 @@ class FundingRateSignal:
             annualized_rate=round(annualized, 2),
             signal_bias=signal_bias,
             signal_strength=round(strength, 3),
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             is_simulated=is_simulated,
         )
         self._cache[spot_symbol] = reading

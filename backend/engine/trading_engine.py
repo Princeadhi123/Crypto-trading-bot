@@ -226,6 +226,7 @@ class TradingEngine:
             logger.warning("Failed to load realized PnL from DB: %s — using default $0.00", exc)
 
     async def initialize_exchange(self, exchange_name: str, api_key: str = "", api_secret: str = ""):
+        await asyncio.sleep(0)
         try:
             exchange_class = getattr(ccxt, exchange_name.lower(), None)
             if exchange_class is None:
@@ -456,8 +457,8 @@ class TradingEngine:
                 regime_analysis.regime.value, ensemble_signal.agreeing_strategies)
         return ensemble_signal
 
-    async def _execute_ensemble_signal(self, es, forced_quantity: float | None = None):
-        # --- Sentiment macro filter ---
+    async def _fetch_and_apply_sentiment(self, es: EnsembleSignal) -> float | None:
+        """Fetch sentiment and return confidence adjustment, or None if blocked."""
         try:
             sentiment = await self.sentiment_filter.fetch_current_sentiment()
             self.current_sentiment = {
@@ -468,69 +469,69 @@ class TradingEngine:
             }
             if not self.sentiment_filter.is_signal_allowed(es.direction, sentiment):
                 logger.info("Sentiment filter blocked %s %s: %s", es.direction, es.symbol, sentiment.reason)
-                return
-            sentiment_confidence_adj = self.sentiment_filter.get_confidence_adjustment(sentiment, es.direction)
+                return None
+            return self.sentiment_filter.get_confidence_adjustment(sentiment, es.direction)
         except Exception:
-            sentiment_confidence_adj = 1.0
+            return 1.0
 
-        # --- Funding rate filter ---
-        funding_reading = None
+    async def _fetch_and_apply_funding(
+        self, es: EnsembleSignal
+    ) -> tuple[float | None, Optional[object]]:
+        """Fetch funding rate and return (confidence adjustment, reading), or (None, None) if blocked."""
         try:
             funding_reading = await self.funding_rate_signal.get_funding_rate(es.symbol)
             if not self.funding_rate_signal.is_signal_aligned_with_funding(es.direction, funding_reading):
                 logger.info("Funding rate blocked %s %s: rate=%.4f%% bias=%s",
                             es.direction, es.symbol, funding_reading.funding_rate * 100, funding_reading.signal_bias)
-                return
-            funding_confidence_adj = self.funding_rate_signal.get_confidence_adjustment(es.direction, funding_reading)
+                return None, None
+            adj = self.funding_rate_signal.get_confidence_adjustment(es.direction, funding_reading)
+            return adj, funding_reading
         except Exception:
-            funding_confidence_adj = 1.0
+            return 1.0, None
 
-        adjusted_confidence = min(es.final_confidence * sentiment_confidence_adj * funding_confidence_adj, 1.0)
-
-        # Bug #1: Handle reversal — close opposing position before opening new one
+    async def _prepare_entry_signal(self, es: EnsembleSignal) -> Optional[EnsembleSignal]:
+        """Handle reversals, side checks and paper price snapping. Returns None if entry should abort."""
         existing_pos = self.active_positions.get(es.symbol)
         if existing_pos is not None:
             if existing_pos.side != es.direction:
                 logger.info("Reversal %s: closing existing %s before opening %s",
                             es.symbol, existing_pos.side, es.direction)
                 await self._close_position(es.symbol, es.weighted_entry_price, "reversal")
-                # Bug #3: if close failed, position still exists — abort the reversal entry
-                # to avoid double exposure with the original trade still live on exchange
                 if es.symbol in self.active_positions:
                     logger.warning("Reversal aborted for %s: close failed, original position still active", es.symbol)
-                    return
+                    return None
             else:
-                return
-        # Live spot exchange: cannot open short positions — block SELL signals
+                return None
         if not self.paper_trading and self.exchange is not None and es.direction == "SELL":
             logger.warning("Blocked SELL %s: spot exchange cannot open short positions", es.symbol)
-            return
-        # In paper trading, snap entry price to live market price so SL/TP are relative
-        # to actual market, not simulated OHLCV price — prevents immediate stop-loss hits
+            return None
         if self.paper_trading:
-            _live_px = self.market_prices.get(es.symbol)
-            if _live_px and _live_px > 0 and es.weighted_entry_price > 0:
-                _scale = _live_px / es.weighted_entry_price
-                es = EnsembleSignal(
+            live_px = self.market_prices.get(es.symbol)
+            if live_px and live_px > 0 and es.weighted_entry_price > 0:
+                scale = live_px / es.weighted_entry_price
+                return EnsembleSignal(
                     symbol=es.symbol, direction=es.direction,
                     composite_confidence=es.composite_confidence,
                     agreeing_strategies=es.agreeing_strategies,
                     disagreeing_strategies=es.disagreeing_strategies,
-                    weighted_entry_price=_live_px,
-                    suggested_stop_loss=round(es.suggested_stop_loss * _scale, 8),
-                    suggested_take_profit=round(es.suggested_take_profit * _scale, 8),
+                    weighted_entry_price=live_px,
+                    suggested_stop_loss=round(es.suggested_stop_loss * scale, 8),
+                    suggested_take_profit=round(es.suggested_take_profit * scale, 8),
                     regime=es.regime, regime_boost=es.regime_boost,
                     raw_signals=es.raw_signals,
                 )
-        open_symbols = self.active_positions.keys()
-        portfolio_value = self._compute_portfolio_value()
-        self.risk_manager.update_peak_portfolio_value(portfolio_value)
-        best_kelly = max((self.performance_tracker.get_kelly_fraction(s.strategy_name)
-                         for s in es.raw_signals), default=0.02)
+        return es
 
-        # Collect all ML training features at entry time. Used both for the
-        # adaptive ML gate below and persisted for continuous retraining.
-        ml_features = {
+    def _build_entry_features(
+        self,
+        es: EnsembleSignal,
+        adjusted_confidence: float,
+        funding_reading: Optional[object],
+        portfolio_value: float,
+        best_kelly: float,
+        open_count: int,
+    ) -> dict:
+        return {
             "symbol": es.symbol,
             "direction": es.direction,
             "regime": es.regime.value,
@@ -546,27 +547,41 @@ class TradingEngine:
             "stop_distance_pct": round(abs(es.weighted_entry_price - es.suggested_stop_loss) / es.weighted_entry_price * 100, 4),
             "risk_reward_ratio": round(abs(es.suggested_take_profit - es.weighted_entry_price) / max(abs(es.weighted_entry_price - es.suggested_stop_loss), 1e-10), 3),
             "portfolio_drawdown_at_entry": round(self.risk_manager.compute_current_drawdown_percent(portfolio_value), 2),
-            "open_positions_at_entry": len(open_symbols),
+            "open_positions_at_entry": open_count,
             "hft_mode": self.hft_mode,
         }
 
-        # --- ML adaptive filter: block entries the model predicts will lose ---
-        # Hedge legs (forced_quantity) bypass the gate — they must always execute
-        # to keep pairs trades delta-neutral once the primary leg is open.
-        if forced_quantity is None:
-            ml_probability = self.ml_filter.score(ml_features)
-            if ml_probability is not None:
-                ml_features["ml_win_probability"] = round(ml_probability, 4)
-                if ml_probability < self.ml_filter.min_win_probability:
-                    logger.info("ML filter blocked %s %s: win probability %.3f < %.3f",
-                                es.direction, es.symbol, ml_probability,
-                                self.ml_filter.min_win_probability)
-                    return
-                # Scale confidence by model conviction: prob 0.5 → 1.0x, prob 1.0 → 1.25x
-                adjusted_confidence = min(adjusted_confidence * (0.75 + ml_probability * 0.5), 1.0)
-
+    def _apply_ml_entry_filter(
+        self,
+        ml_features: dict,
+        es: EnsembleSignal,
+        adjusted_confidence: float,
+        forced_quantity: float | None,
+    ) -> float | None:
+        """Apply ML win-probability gate. Returns new confidence or None if blocked."""
         if forced_quantity is not None:
-            # Bug #4: pairs hedge leg bypasses risk manager to match primary leg's USD value
+            return adjusted_confidence
+        ml_probability = self.ml_filter.score(ml_features)
+        if ml_probability is None:
+            return adjusted_confidence
+        ml_features["ml_win_probability"] = round(ml_probability, 4)
+        if ml_probability < self.ml_filter.min_win_probability:
+            logger.info("ML filter blocked %s %s: win probability %.3f < %.3f",
+                        es.direction, es.symbol, ml_probability, self.ml_filter.min_win_probability)
+            return None
+        return min(adjusted_confidence * (0.75 + ml_probability * 0.5), 1.0)
+
+    def _size_entry(
+        self,
+        es: EnsembleSignal,
+        adjusted_confidence: float,
+        forced_quantity: float | None,
+        best_kelly: float,
+        portfolio_value: float,
+    ) -> Optional[object]:
+        """Run risk sizing and exchange precision checks. Returns sizing result or None if rejected."""
+        open_symbols = self.active_positions.keys()
+        if forced_quantity is not None:
             sizing = self.risk_manager.calculate_position_size(
                 portfolio_value=portfolio_value, entry_price=es.weighted_entry_price,
                 stop_loss_price=es.suggested_stop_loss, signal_confidence=adjusted_confidence,
@@ -586,79 +601,127 @@ class TradingEngine:
             )
         if not sizing.allowed:
             logger.info("Rejected %s: %s", es.symbol, sizing.rejection_reason)
-            return
-        # Apply exchange lot-size precision rules to avoid InvalidOrder in live mode
+            return None
         if not self.paper_trading and self.exchange is not None:
             try:
                 sizing.quantity = float(self.exchange.amount_to_precision(es.symbol, sizing.quantity))
                 if sizing.quantity <= 0:
                     logger.warning("Rejected %s: quantity rounds to zero after exchange precision", es.symbol)
-                    return
+                    return None
             except Exception:
                 pass
-            # Bug #5: Re-validate MIN_NOTIONAL after precision step-size rounding
             post_precision_value = sizing.quantity * es.weighted_entry_price
             if post_precision_value < 5.0:
                 logger.warning("Rejected %s: post-precision value $%.2f below MIN_NOTIONAL $5.00",
-                                es.symbol, post_precision_value)
-                return
-        fill_quantity = sizing.quantity  # Bug #2: updated to actual exchange fill below
+                               es.symbol, post_precision_value)
+                return None
+        return sizing
+
+    async def _execute_twap_entry(
+        self, es: EnsembleSignal, sizing: object, order_side: str
+    ) -> Optional[tuple[float, float]]:
+        twap_order = self.twap_executor.create_order(
+            es.symbol, order_side, sizing.quantity,
+            exchange=self.exchange, price=es.weighted_entry_price
+        )
+        twap_order = await self.twap_executor.execute_order(
+            twap_order, self._fetch_current_price, exchange=self.exchange
+        )
+        actual_price = twap_order.avg_fill_price if twap_order.avg_fill_price is not None else es.weighted_entry_price
+        fill_quantity = twap_order.total_filled if twap_order.total_filled is not None else sizing.quantity
+        if fill_quantity == 0:
+            logger.error("TWAP entry zero-filled for %s — aborting position open", es.symbol)
+            return None
+        return fill_quantity, actual_price
+
+    async def _execute_market_entry(
+        self, es: EnsembleSignal, sizing: object, order_side: str
+    ) -> Optional[tuple[float, float]]:
+        order = await self.exchange.create_market_order(es.symbol, order_side, sizing.quantity)
+        actual_price = float(order.get("average") or order.get("price") or es.weighted_entry_price)
+        _raw = order.get("filled")
+        _filled = float(_raw) if _raw is not None else sizing.quantity
+        if _filled == 0:
+            logger.error("Market entry zero-filled for %s — aborting position open", es.symbol)
+            return None
+        fill_quantity = _filled * (1 - TRADE_FEE_RATE) if es.direction == "BUY" else _filled
+        return fill_quantity, actual_price
+
+    async def _execute_live_entry_order(
+        self, es: EnsembleSignal, sizing: object
+    ) -> Optional[tuple[float, float]]:
+        order_side = "buy" if es.direction == "BUY" else "sell"
+        portfolio_value_now = self._compute_portfolio_value()
+        if sizing.position_value >= portfolio_value_now * TWAP_THRESHOLD_PCT:
+            return await self._execute_twap_entry(es, sizing, order_side)
+        return await self._execute_market_entry(es, sizing, order_side)
+
+    async def _execute_entry_order(
+        self, es: EnsembleSignal, sizing: object
+    ) -> Optional[tuple[float, float, EnsembleSignal]]:
+        """Execute paper or live entry order. Returns (fill_quantity, actual_price, updated_es)."""
+        fill_quantity = sizing.quantity
         if self.paper_trading:
             if self.paper_balance < sizing.position_value:
-                return
+                return None
             self.paper_balance -= sizing.position_value
-        elif self.exchange is not None:
-            # Live trading: route through TWAP for large orders, direct market order for small ones
-            try:
-                order_side = "buy" if es.direction == "BUY" else "sell"
-                portfolio_value_now = self._compute_portfolio_value()
-                if sizing.position_value >= portfolio_value_now * TWAP_THRESHOLD_PCT:
-                    twap_order = self.twap_executor.create_order(
-                        es.symbol, order_side, sizing.quantity,
-                        exchange=self.exchange, price=es.weighted_entry_price
-                    )
-                    twap_order = await self.twap_executor.execute_order(
-                        twap_order, self._fetch_current_price, exchange=self.exchange
-                    )
-                    actual_price = twap_order.avg_fill_price if twap_order.avg_fill_price is not None else es.weighted_entry_price
-                    fill_quantity = twap_order.total_filled if twap_order.total_filled is not None else sizing.quantity
-                    if fill_quantity == 0:
-                        logger.error("TWAP entry zero-filled for %s — aborting position open", es.symbol)
-                        return
-                else:
-                    order = await self.exchange.create_market_order(
-                        es.symbol, order_side, sizing.quantity
-                    )
-                    actual_price = float(order.get("average") or order.get("price") or es.weighted_entry_price)
-                    # Bug #2: on Binance Spot BUY, fee is taken from the received asset.
-                    # CCXT 'filled' = gross matched volume; net delivery = filled * (1 - fee_rate)
-                    _raw = order.get("filled")
-                    _filled = float(_raw) if _raw is not None else sizing.quantity
-                    if _filled == 0:
-                        logger.error("Market entry zero-filled for %s — aborting position open", es.symbol)
-                        return
-                    fill_quantity = _filled * (1 - TRADE_FEE_RATE) if es.direction == "BUY" else _filled
-                logger.info("Live order filled: %s %s qty=%.6f @ %.4f", es.direction, es.symbol, fill_quantity, actual_price)
-                es = EnsembleSignal(
-                    symbol=es.symbol, direction=es.direction,
-                    composite_confidence=es.composite_confidence,
-                    agreeing_strategies=es.agreeing_strategies,
-                    disagreeing_strategies=es.disagreeing_strategies,
-                    weighted_entry_price=actual_price,
-                    suggested_stop_loss=es.suggested_stop_loss,
-                    suggested_take_profit=es.suggested_take_profit,
-                    regime=es.regime, regime_boost=es.regime_boost,
-                    raw_signals=es.raw_signals,
-                )
-            except Exception:
-                logger.exception("Live order submission failed for %s", es.symbol)
-                return
-        label = " + ".join(es.agreeing_strategies)
+            return fill_quantity, es.weighted_entry_price, es
+        if self.exchange is None:
+            return None
+        try:
+            fill_quantity, actual_price = await self._execute_live_entry_order(es, sizing)
+        except Exception:
+            logger.exception("Live order submission failed for %s", es.symbol)
+            return None
+        logger.info("Live order filled: %s %s qty=%.6f @ %.4f", es.direction, es.symbol, fill_quantity, actual_price)
+        updated_es = EnsembleSignal(
+            symbol=es.symbol, direction=es.direction,
+            composite_confidence=es.composite_confidence,
+            agreeing_strategies=es.agreeing_strategies,
+            disagreeing_strategies=es.disagreeing_strategies,
+            weighted_entry_price=actual_price,
+            suggested_stop_loss=es.suggested_stop_loss,
+            suggested_take_profit=es.suggested_take_profit,
+            regime=es.regime, regime_boost=es.regime_boost,
+            raw_signals=es.raw_signals,
+        )
+        return fill_quantity, actual_price, updated_es
 
-        # Attach raw per-strategy details to the persisted feature snapshot
+    async def _execute_ensemble_signal(self, es, forced_quantity: float | None = None):
+        sentiment_adj = await self._fetch_and_apply_sentiment(es)
+        if sentiment_adj is None:
+            return
+        funding_adj, funding_reading = await self._fetch_and_apply_funding(es)
+        if funding_adj is None:
+            return
+        adjusted_confidence = min(es.final_confidence * sentiment_adj * funding_adj, 1.0)
+
+        es = await self._prepare_entry_signal(es)
+        if es is None:
+            return
+
+        portfolio_value = self._compute_portfolio_value()
+        self.risk_manager.update_peak_portfolio_value(portfolio_value)
+        best_kelly = max((self.performance_tracker.get_kelly_fraction(s.strategy_name)
+                         for s in es.raw_signals), default=0.02)
+        ml_features = self._build_entry_features(
+            es, adjusted_confidence, funding_reading, portfolio_value, best_kelly, len(self.active_positions)
+        )
+        adjusted_confidence = self._apply_ml_entry_filter(ml_features, es, adjusted_confidence, forced_quantity)
+        if adjusted_confidence is None:
+            return
+
+        sizing = self._size_entry(es, adjusted_confidence, forced_quantity, best_kelly, portfolio_value)
+        if sizing is None:
+            return
+
+        result = await self._execute_entry_order(es, sizing)
+        if result is None:
+            return
+        fill_quantity, _, es = result
+
         ml_features["raw_signal_details"] = [s.details for s in es.raw_signals]
-
-        # Bug #1: register in-memory BEFORE DB write — a DB crash must never orphan a live exchange fill
+        label = " + ".join(es.agreeing_strategies)
         position = ActivePosition(
             trade_id=0, symbol=es.symbol, side=es.direction, strategy=label,
             entry_price=es.weighted_entry_price, quantity=fill_quantity,
@@ -680,9 +743,8 @@ class TradingEngine:
                 await session.commit()
                 await session.refresh(trade)
                 position.trade_id = trade.id
-        except Exception as _db_exc:
-            logger.error("DB write failed for %s entry — position tracked in memory without DB record: %s",
-                         es.symbol, _db_exc)
+        except Exception:
+            logger.exception("DB write failed for %s entry — position tracked in memory without DB record", es.symbol)
         self.recent_signals.insert(0, {"symbol": es.symbol, "strategy": label,
             "signal_type": es.direction, "strength": es.final_confidence,
             "price": es.weighted_entry_price, "timestamp": es.timestamp.isoformat(),
@@ -713,11 +775,45 @@ class TradingEngine:
                 if new_trail < position.stop_loss:
                     position.stop_loss = round(new_trail, 8)
 
+    def _get_long_exit_decision(self, position: ActivePosition, current_price: float) -> tuple[bool, str]:
+        if current_price <= position.stop_loss:
+            return True, "trailing_stop" if position.trailing_stop_activated else "stop_loss"
+        if current_price >= position.take_profit:
+            return True, "take_profit"
+        return False, ""
+
+    def _get_short_exit_decision(self, position: ActivePosition, current_price: float) -> tuple[bool, str]:
+        if current_price >= position.stop_loss:
+            return True, "trailing_stop" if position.trailing_stop_activated else "stop_loss"
+        if current_price <= position.take_profit:
+            return True, "take_profit"
+        return False, ""
+
+    def _get_exit_decision(self, position: ActivePosition, current_price: float) -> tuple[bool, str]:
+        """Return (should_close, reason) for a single position."""
+        if position.side == "BUY":
+            return self._get_long_exit_decision(position, current_price)
+        return self._get_short_exit_decision(position, current_price)
+
+    async def _persist_stop_updates(self, stop_updates: list[tuple[int, float]]):
+        """Batch-persist trailing stop changes so restarts load the tight stop."""
+        try:
+            async with AsyncSessionLocal() as _s:
+                for _tid, _new_stop in stop_updates:
+                    await _s.execute(
+                        update(TradeRecord)
+                        .where(TradeRecord.id == _tid)
+                        .values(stop_loss_price=_new_stop)
+                    )
+                await _s.commit()
+        except Exception as _exc:
+            logger.warning("Failed to persist trailing stop updates: %s", _exc)
+
     async def _check_exit_conditions(self):
         symbols_to_close = []
         stop_updates: list[tuple[int, float]] = []  # (trade_id, new_stop_loss)
         # Bug #1: snapshot keys to prevent RuntimeError if main loop mutates dict while awaiting
-        for symbol, position in list(self.active_positions.items()):
+        for symbol, position in tuple(self.active_positions.items()):
             if symbol not in self.active_symbols:
                 fetched = await self._fetch_current_price(symbol)
                 if fetched:
@@ -729,128 +825,116 @@ class TradingEngine:
             # Bug #4: capture changed stops for batch DB persist
             if position.stop_loss != _old_stop and position.trade_id:
                 stop_updates.append((position.trade_id, position.stop_loss))
-            should_close = False
-            close_reason = ""
-            if position.side == "BUY":
-                if current_price <= position.stop_loss:
-                    should_close = True
-                    close_reason = "trailing_stop" if position.trailing_stop_activated else "stop_loss"
-                elif current_price >= position.take_profit:
-                    should_close = True
-                    close_reason = "take_profit"
-            else:
-                if current_price >= position.stop_loss:
-                    should_close = True
-                    close_reason = "trailing_stop" if position.trailing_stop_activated else "stop_loss"
-                elif current_price <= position.take_profit:
-                    should_close = True
-                    close_reason = "take_profit"
+            should_close, close_reason = self._get_exit_decision(position, current_price)
             if should_close:
                 symbols_to_close.append((symbol, current_price, close_reason))
-        # Bug #4: batch-persist trailing stop changes so restarts load the tight stop, not the wide initial one
-        if stop_updates:
-            try:
-                async with AsyncSessionLocal() as _s:
-                    for _tid, _new_stop in stop_updates:
-                        await _s.execute(
-                            update(TradeRecord)
-                            .where(TradeRecord.id == _tid)
-                            .values(stop_loss_price=_new_stop)
-                        )
-                    await _s.commit()
-            except Exception as _exc:
-                logger.warning("Failed to persist trailing stop updates: %s", _exc)
+        await self._persist_stop_updates(stop_updates)
         for symbol, exit_price, reason in symbols_to_close:
             await self._close_position(symbol, exit_price, reason)
 
-    async def _close_position(self, symbol: str, exit_price: float, reason: str):
-        position = self.active_positions.get(symbol)
-        if position is None:
-            return
-
-        # Compute PnL from the actual exit_price, not from position.current_price
-        # which may be stale if the exit was triggered by a stop/TP check
+    def _calculate_close_pnl(self, position: ActivePosition, exit_price: float) -> tuple[float, float, float, float]:
+        """Return (pnl, fee, pnl_percent, cost_basis) for a position close at exit_price."""
         if position.side == "BUY":
             pnl = (exit_price - position.entry_price) * position.quantity
         else:
             pnl = (position.entry_price - exit_price) * position.quantity
-        # Deduct exchange fees: entry leg + exit leg (0.1% each in paper; real fees from order in live)
         fee = (position.entry_price + exit_price) * position.quantity * TRADE_FEE_RATE
         pnl -= fee
         cost_basis = position.entry_price * position.quantity
         pnl_percent = (pnl / cost_basis * 100) if cost_basis > 0 else 0.0
+        return pnl, fee, pnl_percent, cost_basis
 
-        if self.paper_trading:
-            if position.side == "BUY":
-                # Long: receive sale proceeds minus fees (Bug #5: fee must be deducted from balance)
-                self.paper_balance += exit_price * position.quantity - fee
-            else:
-                # Short: return margin deposit (entry_price * qty) plus PnL (already fee-adjusted)
-                self.paper_balance += (position.entry_price * position.quantity) + pnl
-            self.active_positions.pop(symbol)
-        elif self.exchange is not None:
-            # Live trading: only remove position AFTER exchange confirms fill
-            try:
-                close_side = "sell" if position.side == "BUY" else "buy"
-                close_value = exit_price * position.quantity
-                # Bug #2: route large exits through TWAP to avoid slippage dump
-                if close_value >= self._compute_portfolio_value() * TWAP_THRESHOLD_PCT:
-                    twap_order = self.twap_executor.create_order(
-                        symbol, close_side, position.quantity,
-                        exchange=self.exchange, price=exit_price
-                    )
-                    twap_order = await self.twap_executor.execute_order(
-                        twap_order, self._fetch_current_price, exchange=self.exchange
-                    )
-                    exit_price = twap_order.avg_fill_price if twap_order.avg_fill_price is not None else exit_price
-                    closed_qty = twap_order.total_filled if twap_order.total_filled is not None else position.quantity
-                    if closed_qty == 0:
-                        logger.error("TWAP exit zero-filled for %s — position left active", symbol)
-                        return
-                else:
-                    order = await self.exchange.create_market_order(
-                        symbol, close_side, position.quantity
-                    )
-                    exit_price = float(order.get("average") or order.get("price") or exit_price)
-                    closed_qty = float(order.get("filled") or position.quantity)
-                # Recalculate PnL using the actual exchange fill price and closed qty
-                if position.side == "BUY":
-                    pnl = (exit_price - position.entry_price) * closed_qty
-                else:
-                    pnl = (position.entry_price - exit_price) * closed_qty
-                fee = (position.entry_price + exit_price) * closed_qty * TRADE_FEE_RATE
-                pnl -= fee
-                pnl_percent = (pnl / cost_basis * 100) if cost_basis > 0 else 0.0
-                logger.info("Live close filled: %s %s qty=%.6f @ %.4f | PnL=%.2f",
-                            close_side, symbol, closed_qty, exit_price, pnl)
-                # Bug #2: partial TWAP fill — leave remaining quantity active instead of orphaning it
-                remaining_qty = round(position.quantity - closed_qty, 10)
-                if remaining_qty > 0:
-                    position.quantity = remaining_qty
-                    logger.warning("Partial fill %s: %.6f closed, %.6f remaining — position stays active",
-                                   symbol, closed_qty, remaining_qty)
-                    # Bug #3: sync reduced qty to DB so a restart loads the correct amount
-                    if position.trade_id:
-                        try:
-                            async with AsyncSessionLocal() as _s:
-                                await _s.execute(
-                                    update(TradeRecord)
-                                    .where(TradeRecord.id == position.trade_id)
-                                    .values(quantity=remaining_qty)
-                                )
-                                await _s.commit()
-                        except Exception:
-                            logger.exception("Failed to sync partial fill qty for %s", symbol)
-                    return
-                self.active_positions.pop(symbol)
-            except Exception:
-                logger.exception("Live close order failed for %s — position remains active", symbol)
-                return
+    def _apply_paper_close(self, position: ActivePosition, exit_price: float, fee: float, pnl: float):
+        if position.side == "BUY":
+            self.paper_balance += exit_price * position.quantity - fee
         else:
+            self.paper_balance += (position.entry_price * position.quantity) + pnl
+        self.active_positions.pop(position.symbol)
+
+    async def _sync_partial_fill_qty(self, position: ActivePosition):
+        if position.trade_id:
+            try:
+                async with AsyncSessionLocal() as _s:
+                    await _s.execute(
+                        update(TradeRecord)
+                        .where(TradeRecord.id == position.trade_id)
+                        .values(quantity=position.quantity)
+                    )
+                    await _s.commit()
+            except Exception:
+                logger.exception("Failed to sync partial fill qty for %s", position.symbol)
+
+    async def _execute_twap_close(
+        self, position: ActivePosition, symbol: str, exit_price: float, close_side: str
+    ) -> Optional[tuple[float, float]]:
+        twap_order = self.twap_executor.create_order(
+            symbol, close_side, position.quantity,
+            exchange=self.exchange, price=exit_price
+        )
+        twap_order = await self.twap_executor.execute_order(
+            twap_order, self._fetch_current_price, exchange=self.exchange
+        )
+        exit_price = twap_order.avg_fill_price if twap_order.avg_fill_price is not None else exit_price
+        closed_qty = twap_order.total_filled if twap_order.total_filled is not None else position.quantity
+        if closed_qty == 0:
+            logger.error("TWAP exit zero-filled for %s — position left active", symbol)
+            return None
+        return exit_price, closed_qty
+
+    async def _execute_market_close(
+        self, position: ActivePosition, symbol: str, exit_price: float, close_side: str
+    ) -> Optional[tuple[float, float]]:
+        order = await self.exchange.create_market_order(symbol, close_side, position.quantity)
+        exit_price = float(order.get("average") or order.get("price") or exit_price)
+        closed_qty = float(order.get("filled") or position.quantity)
+        return exit_price, closed_qty
+
+    def _compute_live_close_pnl(
+        self, position: ActivePosition, exit_price: float, closed_qty: float, cost_basis: float
+    ) -> tuple[float, float]:
+        if position.side == "BUY":
+            pnl = (exit_price - position.entry_price) * closed_qty
+        else:
+            pnl = (position.entry_price - exit_price) * closed_qty
+        fee = (position.entry_price + exit_price) * closed_qty * TRADE_FEE_RATE
+        pnl -= fee
+        pnl_percent = (pnl / cost_basis * 100) if cost_basis > 0 else 0.0
+        return pnl, pnl_percent
+
+    async def _execute_live_close(
+        self, position: ActivePosition, symbol: str, exit_price: float, cost_basis: float
+    ) -> Optional[tuple[float, float, float]]:
+        """Execute a live close via TWAP or market order. Returns final (exit_price, pnl, pnl_percent) or None."""
+        try:
+            close_side = "sell" if position.side == "BUY" else "buy"
+            close_value = exit_price * position.quantity
+            if close_value >= self._compute_portfolio_value() * TWAP_THRESHOLD_PCT:
+                result = await self._execute_twap_close(position, symbol, exit_price, close_side)
+            else:
+                result = await self._execute_market_close(position, symbol, exit_price, close_side)
+            if result is None:
+                return None
+            exit_price, closed_qty = result
+
+            pnl, pnl_percent = self._compute_live_close_pnl(position, exit_price, closed_qty, cost_basis)
+            logger.info("Live close filled: %s %s qty=%.6f @ %.4f | PnL=%.2f",
+                        close_side, symbol, closed_qty, exit_price, pnl)
+
+            remaining_qty = round(position.quantity - closed_qty, 10)
+            if remaining_qty > 0:
+                position.quantity = remaining_qty
+                logger.warning("Partial fill %s: %.6f closed, %.6f remaining — position stays active",
+                               symbol, closed_qty, remaining_qty)
+                await self._sync_partial_fill_qty(position)
+                return None
             self.active_positions.pop(symbol)
+            return exit_price, pnl, pnl_percent
+        except Exception:
+            logger.exception("Live close order failed for %s — position remains active", symbol)
+            return None
 
+    def _update_close_metrics(self, position: ActivePosition, pnl: float, pnl_percent: float):
         self.total_realized_pnl += pnl
-
         portfolio_value = self._compute_portfolio_value()
         self.var_calculator.record_trade_pnl(pnl_dollar=pnl, portfolio_value=portfolio_value)
         var_report = self.var_calculator.compute(portfolio_value)
@@ -866,11 +950,14 @@ class TradingEngine:
             "max_observed_loss": var_report.max_observed_loss,
             "observations": var_report.observations,
         }
-
         for strategy_name in position.strategy.split(" + "):
             self.performance_tracker.record_trade_outcome(
                 strategy_name=strategy_name.strip(), pnl_percent=round(pnl_percent, 4))
 
+    async def _persist_closed_trade(
+        self, position: ActivePosition, symbol: str, exit_price: float,
+        pnl: float, pnl_percent: float, reason: str
+    ):
         async with AsyncSessionLocal() as session:
             await session.execute(
                 update(TradeRecord)
@@ -884,7 +971,6 @@ class TradingEngine:
                     exit_reason=reason,
                 )
             )
-            # Bug #5: persist updated paper_balance so restarts don't wipe earned equity
             if self.paper_trading:
                 await session.execute(
                     update(BotSettings)
@@ -892,15 +978,31 @@ class TradingEngine:
                     .values(paper_balance=round(self.paper_balance, 8))
                 )
             await session.commit()
-
         logger.info("Closed %s %s at %.4f | PnL: %.2f (%.2f%%) | Reason: %s | Trailing: %s",
                     position.side, symbol, exit_price, pnl, pnl_percent, reason, position.trailing_stop_activated)
 
-        # Adaptive learning: count the closed trade and retrain the ML model in the
-        # background once enough new outcomes have accumulated
+    async def _close_position(self, symbol: str, exit_price: float, reason: str):
+        position = self.active_positions.get(symbol)
+        if position is None:
+            return
+
+        pnl, fee, pnl_percent, cost_basis = self._calculate_close_pnl(position, exit_price)
+
+        if self.paper_trading:
+            self._apply_paper_close(position, exit_price, fee, pnl)
+        elif self.exchange is not None:
+            live_result = await self._execute_live_close(position, symbol, exit_price, cost_basis)
+            if live_result is None:
+                return
+            exit_price, pnl, pnl_percent = live_result
+        else:
+            self.active_positions.pop(symbol)
+
+        self._update_close_metrics(position, pnl, pnl_percent)
+        await self._persist_closed_trade(position, symbol, exit_price, pnl, pnl_percent, reason)
+
         self.ml_filter.record_trade_closed()
         if self.ml_filter.retrain_due():
-            # Reference stored on the filter so the task isn't garbage-collected mid-flight
             self.ml_filter._retrain_task = asyncio.create_task(self.ml_filter.retrain_async())
 
         await self._broadcast("trade_closed", {
@@ -1049,85 +1151,97 @@ class TradingEngine:
         except Exception as exc:
             logger.warning("Failed to refresh live balance: %s", exc)
 
+    async def _process_ensemble_results(self, results: list):
+        for result in results:
+            if result and not isinstance(result, Exception):
+                await self._execute_ensemble_signal(result)
+
+    def _pairs_hedges_sizable(self, sizing, hedges: list) -> bool:
+        return all(
+            h.weighted_entry_price > 0
+            and (sizing.position_value / h.weighted_entry_price) * h.weighted_entry_price >= 5.0
+            for h in hedges
+        )
+
+    async def _execute_pairs_hedges(self, primary_pos: ActivePosition, hedges: list):
+        for hedge in hedges:
+            forced_qty = None
+            if hedge.weighted_entry_price > 0:
+                forced_qty = round(
+                    primary_pos.quantity * primary_pos.entry_price
+                    / hedge.weighted_entry_price, 8
+                )
+            await self._execute_ensemble_signal(hedge, forced_quantity=forced_qty)
+
+    async def _execute_pairs_trade(self, pairs_legs: list):
+        available = self.risk_manager.max_concurrent_positions - len(self.active_positions)
+        if available < len(pairs_legs):
+            logger.info("Pairs trade skipped: need %d free slots, only %d available",
+                        len(pairs_legs), available)
+            return
+        primary, *hedges = pairs_legs
+        portfolio_value = self._compute_portfolio_value()
+        self.risk_manager.update_peak_portfolio_value(portfolio_value)
+        best_kelly = max((self.performance_tracker.get_kelly_fraction(s.strategy_name)
+                          for s in primary.raw_signals), default=0.02)
+        pre_sizing = self.risk_manager.calculate_position_size(
+            portfolio_value=portfolio_value, entry_price=primary.weighted_entry_price,
+            stop_loss_price=primary.suggested_stop_loss,
+            signal_confidence=primary.final_confidence,
+            open_positions_count=len(self.active_positions),
+            open_symbols=self.active_positions.keys(),
+            symbol=primary.symbol, side=primary.direction, kelly_fraction=best_kelly,
+        )
+        if not pre_sizing.allowed or not self._pairs_hedges_sizable(pre_sizing, hedges):
+            logger.debug("Pairs aborted: pre-validation failed — no legs executed")
+            return
+        await self._execute_ensemble_signal(primary)
+        primary_pos = self.active_positions.get(primary.symbol)
+        if primary_pos is None:
+            logger.info("Pairs: primary leg %s not opened — all hedge legs skipped", primary.symbol)
+            return
+        await self._execute_pairs_hedges(primary_pos, hedges)
+
+    async def _broadcast_portfolio_update(self):
+        portfolio_value = self._compute_portfolio_value()
+        await self._broadcast("price_update", {
+            "prices": self.market_prices,
+            "portfolio_value": portfolio_value,
+            "available_balance": self.paper_balance,
+            "unrealized_pnl": sum(p.unrealized_pnl for p in self.active_positions.values()),
+            "active_positions_count": len(self.active_positions),
+            "regimes": self.current_regimes,
+            "hft_mode": self.hft_mode,
+        })
+
+    async def _maybe_refresh_live_balance(self):
+        if not self.paper_trading and self.exchange is not None:
+            await self._refresh_live_balance()
+
     async def _trading_loop(self):
         mode_label = "HFT 1m" if self.hft_mode else "Standard 5m"
         logger.info("Trading loop started [%s | %ds interval]", mode_label, self._loop_interval)
         while self.is_running:
             try:
                 self.last_tick = datetime.now(timezone.utc)
-
-                # Refresh live exchange balance for accurate portfolio value and risk sizing
-                if not self.paper_trading and self.exchange is not None:
-                    await self._refresh_live_balance()
+                await self._maybe_refresh_live_balance()
 
                 # PARALLEL: process all symbols simultaneously — not sequentially
                 results = await asyncio.gather(
                     *[self._run_ensemble_for_symbol(sym) for sym in self.active_symbols],
                     return_exceptions=True
                 )
-                for result in results:
-                    if result and not isinstance(result, Exception):
-                        await self._execute_ensemble_signal(result)
+                await self._process_ensemble_results(results)
 
-                # Run Statistical Arbitrage separately — both legs must execute or neither does
                 pairs_legs = await self._run_pairs_signal()
                 if pairs_legs:
-                    available = self.risk_manager.max_concurrent_positions - len(self.active_positions)
-                    if available >= len(pairs_legs):
-                        primary, *hedges = pairs_legs
-                        # Bug #2: pre-validate sizing for ALL legs before any API call
-                        _pv = self._compute_portfolio_value()
-                        self.risk_manager.update_peak_portfolio_value(_pv)
-                        _kelly = max((self.performance_tracker.get_kelly_fraction(s.strategy_name)
-                                      for s in primary.raw_signals), default=0.02)
-                        _pre = self.risk_manager.calculate_position_size(
-                            portfolio_value=_pv, entry_price=primary.weighted_entry_price,
-                            stop_loss_price=primary.suggested_stop_loss,
-                            signal_confidence=primary.final_confidence,
-                            open_positions_count=len(self.active_positions),
-                            open_symbols=self.active_positions.keys(),
-                            symbol=primary.symbol, side=primary.direction, kelly_fraction=_kelly,
-                        )
-                        _hedges_ok = _pre.allowed and all(
-                            h.weighted_entry_price > 0
-                            and (_pre.position_value / h.weighted_entry_price) * h.weighted_entry_price >= 5.0
-                            for h in hedges
-                        )
-                        if not _hedges_ok:
-                            logger.debug("Pairs aborted: pre-validation failed — no legs executed")
-                        else:
-                            await self._execute_ensemble_signal(primary)
-                            primary_pos = self.active_positions.get(primary.symbol)
-                            if primary_pos is None:
-                                logger.info("Pairs: primary leg %s not opened — all hedge legs skipped", primary.symbol)
-                            else:
-                                for hedge in hedges:
-                                    forced_qty = None
-                                    if hedge.weighted_entry_price > 0:
-                                        forced_qty = round(
-                                            primary_pos.quantity * primary_pos.entry_price
-                                            / hedge.weighted_entry_price, 8
-                                        )
-                                    await self._execute_ensemble_signal(hedge, forced_quantity=forced_qty)
-                    else:
-                        logger.info("Pairs trade skipped: need %d free slots, only %d available",
-                                    len(pairs_legs), available)
+                    await self._execute_pairs_trade(pairs_legs)
 
                 # In standard mode, also check exits in this loop (HFT has dedicated loop)
                 if not self.hft_mode:
                     await self._check_exit_conditions()
 
-                portfolio_value = self._compute_portfolio_value()
-                await self._broadcast("price_update", {
-                    "prices": self.market_prices,
-                    "portfolio_value": portfolio_value,
-                    "available_balance": self.paper_balance,
-                    "unrealized_pnl": sum(p.unrealized_pnl for p in self.active_positions.values()),
-                    "active_positions_count": len(self.active_positions),
-                    "regimes": self.current_regimes,
-                    "hft_mode": self.hft_mode,
-                })
-
+                await self._broadcast_portfolio_update()
                 await asyncio.sleep(self._loop_interval)
             except asyncio.CancelledError:
                 raise
@@ -1214,90 +1328,96 @@ class TradingEngine:
                     "HFT" if self.hft_mode else "Standard",
                     self.paper_trading, self.active_symbols, self.active_strategy_names)
 
-    async def stop(self):
-        self.is_running = False
+    async def _cancel_engine_tasks(self):
         if self._price_stream_task:
             self._price_stream_task.cancel()
             await self._price_stream_task
         if self._main_loop_task:
             self._main_loop_task.cancel()
             await self._main_loop_task
-        # Close any open positions in the DB so they're never stuck as 'open' forever
-        if self.active_positions:
-            # Bug #5: track which symbols exchange actually confirmed closed
-            exchange_closed: set[str] = set()
-            if not self.paper_trading and self.exchange is not None:
-                for _pos in list(self.active_positions.values()):
-                    try:
-                        _side = "sell" if _pos.side == "BUY" else "buy"
-                        _close_val = _pos.quantity * self.market_prices.get(_pos.symbol, _pos.entry_price)
-                        # Bug #3: route large shutdown closes through TWAP to avoid slippage dump
-                        if _close_val >= self._compute_portfolio_value() * TWAP_THRESHOLD_PCT:
-                            _twap = self.twap_executor.create_order(
-                                _pos.symbol, _side, _pos.quantity,
-                                exchange=self.exchange,
-                                price=self.market_prices.get(_pos.symbol, _pos.entry_price)
-                            )
-                            _twap = await self.twap_executor.execute_order(
-                                _twap, self._fetch_current_price, exchange=self.exchange
-                            )
-                            _px = _twap.avg_fill_price or self.market_prices.get(_pos.symbol, _pos.current_price)
-                        else:
-                            _order = await self.exchange.create_market_order(_pos.symbol, _side, _pos.quantity)
-                            _px = float(_order.get("average") or _order.get("price")
-                                        or self.market_prices.get(_pos.symbol, _pos.current_price))
-                        self.market_prices[_pos.symbol] = _px
-                        exchange_closed.add(_pos.symbol)
-                        logger.info("Stop: live close filled: %s %s @ %.4f", _side, _pos.symbol, _px)
-                    except Exception:
-                        logger.exception("Stop: failed to close live position %s — left open in DB", _pos.symbol)
-            try:
-                async with AsyncSessionLocal() as session:
-                    for pos in self.active_positions.values():
-                        # Only mark closed in DB if paper trade OR exchange confirmed the close
-                        if not self.paper_trading and pos.symbol not in exchange_closed:
-                            continue
-                        exit_px = self.market_prices.get(pos.symbol, pos.current_price)
-                        if pos.side == "BUY":
-                            pnl = (exit_px - pos.entry_price) * pos.quantity
-                        else:
-                            pnl = (pos.entry_price - exit_px) * pos.quantity
-                        fee = (pos.entry_price + exit_px) * pos.quantity * TRADE_FEE_RATE
-                        pnl -= fee
-                        cost = pos.entry_price * pos.quantity
-                        pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
-                        # Bug #5: refund paper balance when bot stops with open positions
-                        if self.paper_trading:
-                            if pos.side == "BUY":
-                                self.paper_balance += exit_px * pos.quantity - fee
-                            else:
-                                self.paper_balance += (pos.entry_price * pos.quantity) + pnl
-                        await session.execute(
-                            update(TradeRecord)
-                            .where(TradeRecord.id == pos.trade_id)
-                            .values(
-                                exit_price=round(exit_px, 8),
-                                profit_loss=round(pnl, 4),
-                                profit_loss_percent=round(pnl_pct, 4),
-                                status="closed",
-                                closed_at=datetime.now(timezone.utc),
-                                exit_reason="bot_stopped",
-                            )
-                        )
-                    # Bug #5: persist the updated paper balance so it survives restart
+
+    async def _close_live_position_on_stop(self, pos: ActivePosition, exchange_closed: set[str]):
+        try:
+            side = "sell" if pos.side == "BUY" else "buy"
+            close_price = self.market_prices.get(pos.symbol, pos.entry_price)
+            close_value = pos.quantity * close_price
+            if close_value >= self._compute_portfolio_value() * TWAP_THRESHOLD_PCT:
+                twap = self.twap_executor.create_order(
+                    pos.symbol, side, pos.quantity,
+                    exchange=self.exchange, price=close_price
+                )
+                twap = await self.twap_executor.execute_order(
+                    twap, self._fetch_current_price, exchange=self.exchange
+                )
+                fill_price = twap.avg_fill_price or self.market_prices.get(pos.symbol, pos.current_price)
+            else:
+                order = await self.exchange.create_market_order(pos.symbol, side, pos.quantity)
+                fill_price = float(order.get("average") or order.get("price")
+                                or self.market_prices.get(pos.symbol, pos.current_price))
+            self.market_prices[pos.symbol] = fill_price
+            exchange_closed.add(pos.symbol)
+            logger.info("Stop: live close filled: %s %s @ %.4f", side, pos.symbol, fill_price)
+        except Exception:
+            logger.exception("Stop: failed to close live position %s — left open in DB", pos.symbol)
+
+    async def _close_all_positions_on_stop(self) -> set[str]:
+        exchange_closed: set[str] = set()
+        if not self.paper_trading and self.exchange is not None:
+            for pos in tuple(self.active_positions.values()):
+                await self._close_live_position_on_stop(pos, exchange_closed)
+        return exchange_closed
+
+    def _compute_stop_position_pnl(self, pos: ActivePosition, exit_px: float) -> tuple[float, float, float]:
+        if pos.side == "BUY":
+            pnl = (exit_px - pos.entry_price) * pos.quantity
+        else:
+            pnl = (pos.entry_price - exit_px) * pos.quantity
+        fee = (pos.entry_price + exit_px) * pos.quantity * TRADE_FEE_RATE
+        pnl -= fee
+        cost = pos.entry_price * pos.quantity
+        pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
+        return pnl, pnl_pct, fee
+
+    def _refund_paper_balance_for_stop(self, pos: ActivePosition, exit_px: float, fee: float, pnl: float):
+        if pos.side == "BUY":
+            self.paper_balance += exit_px * pos.quantity - fee
+        else:
+            self.paper_balance += (pos.entry_price * pos.quantity) + pnl
+
+    async def _persist_stopped_positions(self, exchange_closed: set[str]):
+        try:
+            async with AsyncSessionLocal() as session:
+                for pos in self.active_positions.values():
+                    if not self.paper_trading and pos.symbol not in exchange_closed:
+                        continue
+                    exit_px = self.market_prices.get(pos.symbol, pos.current_price)
+                    pnl, pnl_pct, fee = self._compute_stop_position_pnl(pos, exit_px)
                     if self.paper_trading:
-                        await session.execute(
-                            update(BotSettings)
-                            .where(BotSettings.id == 1)
-                            .values(paper_balance=round(self.paper_balance, 8))
+                        self._refund_paper_balance_for_stop(pos, exit_px, fee, pnl)
+                    await session.execute(
+                        update(TradeRecord)
+                        .where(TradeRecord.id == pos.trade_id)
+                        .values(
+                            exit_price=round(exit_px, 8),
+                            profit_loss=round(pnl, 4),
+                            profit_loss_percent=round(pnl_pct, 4),
+                            status="closed",
+                            closed_at=datetime.now(timezone.utc),
+                            exit_reason="bot_stopped",
                         )
-                    await session.commit()
-                logger.info("Closed %d open position(s) on engine stop", len(self.active_positions))
-            except Exception:
-                logger.exception("Failed to close open positions on stop")
-            self.active_positions.clear()
-        # Clear recent signals so stale signals from previous session don't persist
-        self.recent_signals.clear()
+                    )
+                if self.paper_trading:
+                    await session.execute(
+                        update(BotSettings)
+                        .where(BotSettings.id == 1)
+                        .values(paper_balance=round(self.paper_balance, 8))
+                    )
+                await session.commit()
+            logger.info("Closed %d open position(s) on engine stop", len(self.active_positions))
+        except Exception:
+            logger.exception("Failed to close open positions on stop")
+
+    async def _cleanup_exchanges(self):
         if self.exchange:
             await self.exchange.close()
         if self._public_data_exchange is not None:
@@ -1306,11 +1426,20 @@ class TradingEngine:
             except Exception:
                 pass
             self._public_data_exchange = None
-        # Shutdown thread pool for CPU-bound work
         if self._cpu_executor is not None:
             self._cpu_executor.shutdown(wait=True)
             self._cpu_executor = None
         await close_public_futures_exchange()
+
+    async def stop(self):
+        self.is_running = False
+        await self._cancel_engine_tasks()
+        if self.active_positions:
+            exchange_closed = await self._close_all_positions_on_stop()
+            await self._persist_stopped_positions(exchange_closed)
+            self.active_positions.clear()
+        self.recent_signals.clear()
+        await self._cleanup_exchanges()
         logger.info("Trading engine stopped")
 
     def apply_settings(self, settings: dict) -> dict:
@@ -1344,7 +1473,7 @@ class TradingEngine:
             # falls back to live fetch_ticker instead of returning stale cached price
             removed = set(self.active_symbols) - set(new_symbols)
             for sym in removed:
-                for cache_key in [k for k in list(self.ohlcv_cache.keys()) if k.startswith(f"{sym}_")]:
+                for cache_key in [k for k in self.ohlcv_cache if k.startswith(f"{sym}_")]:
                     self.ohlcv_cache.pop(cache_key, None)
                     self._ohlcv_cache_time.pop(cache_key, None)
             self.active_symbols = new_symbols

@@ -21,7 +21,13 @@ class LoginRequest(BaseModel):
     password: str
 
 
-@router.post("/login")
+@router.post(
+    "/login",
+    responses={
+        503: {"description": "Login system disabled"},
+        401: {"description": "Invalid username or password"},
+    },
+)
 async def login(request: Request, body: LoginRequest):
     rate_limit(request, max_calls=5, window_secs=60)
     admin_user, admin_hash = get_admin_credentials()
